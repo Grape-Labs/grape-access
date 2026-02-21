@@ -80,10 +80,10 @@ Optional:
 
 - `NEXT_PUBLIC_WALLET_CONNECTOR_RPC`
   - If set, wallet connection provider uses this RPC endpoint.
-  - If not set, defaults to `NEXT_PUBLIC_SHYFT_MAINNET_RPC` if present, otherwise Solana mainnet public RPC.
+  - If not set, defaults to Shyft mainnet RPC.
 - `NEXT_PUBLIC_SHYFT_MAINNET_RPC`
   - Preferred mainnet RPC used when `Mainnet Beta` is selected in Connection Settings.
-  - Keep this in environment variables rather than hardcoding in source.
+  - Optional override for the default Shyft mainnet RPC value.
 
 Example `.env.local`:
 

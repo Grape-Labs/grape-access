@@ -63,7 +63,9 @@ type CriteriaKind =
 
 type GateTypeKind = "singleUse" | "reusable" | "timeLimited" | "subscription";
 type ClusterKind = "devnet" | "testnet" | "mainnet-beta" | "custom";
-const SHYFT_MAINNET_RPC = process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC?.trim();
+const SHYFT_MAINNET_RPC =
+  process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC?.trim() ||
+  "https://rpc.shyft.to?api_key=djvYMX3G_jA4IDf8";
 const DEFAULT_CLUSTER: ClusterKind = "mainnet-beta";
 
 interface WalletProvider {
@@ -788,7 +790,7 @@ export default function Page() {
       return customRpc.trim();
     }
     if (cluster === "mainnet-beta") {
-      return SHYFT_MAINNET_RPC || clusterApiUrl("mainnet-beta");
+      return SHYFT_MAINNET_RPC;
     }
     return clusterApiUrl(cluster);
   }, [cluster, customRpc]);
@@ -798,7 +800,7 @@ export default function Page() {
       return customRpc.trim() ? "Custom RPC configured" : "Custom RPC not set";
     }
     if (cluster === "mainnet-beta") {
-      return SHYFT_MAINNET_RPC ? "Shyft (preferred, hidden)" : "Solana Mainnet Public RPC";
+      return "Shyft (preferred, hidden)";
     }
     if (cluster === "testnet") {
       return "Solana Testnet Public RPC";

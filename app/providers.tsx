@@ -9,16 +9,16 @@ import {
   SolflareWalletAdapter,
   TrustWalletAdapter
 } from "@solana/wallet-adapter-wallets";
-import { clusterApiUrl } from "@solana/web3.js";
 import "@solana/wallet-adapter-react-ui/styles.css";
 
 export function Providers({ children }: PropsWithChildren) {
-  const shyftMainnetRpc = process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC?.trim();
+  const shyftMainnetRpc =
+    process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC?.trim() ||
+    "https://rpc.shyft.to?api_key=djvYMX3G_jA4IDf8";
   const endpoint = useMemo(
     () =>
       process.env.NEXT_PUBLIC_WALLET_CONNECTOR_RPC ??
-      shyftMainnetRpc ??
-      clusterApiUrl("mainnet-beta"),
+      shyftMainnetRpc,
     [shyftMainnetRpc]
   );
   const wallets = useMemo(
