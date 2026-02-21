@@ -717,7 +717,7 @@ export default function Page() {
   };
 
   return (
-    <Container maxWidth="lg" sx={{ py: { xs: 2, md: 2.8 } }}>
+    <Container maxWidth="lg" className="dramatic-shell" sx={{ py: { xs: 2, md: 2.8 } }}>
       <Paper
         className="panel"
         sx={{ p: { xs: 1.4, md: 1.6 }, mb: 2, position: "relative", overflow: "visible", zIndex: 8 }}
