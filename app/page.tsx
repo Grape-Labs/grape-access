@@ -63,9 +63,8 @@ type CriteriaKind =
 
 type GateTypeKind = "singleUse" | "reusable" | "timeLimited" | "subscription";
 type ClusterKind = "devnet" | "testnet" | "mainnet-beta" | "custom";
-const SHYFT_MAINNET_RPC =
-  process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC?.trim() ||
-  "https://rpc.shyft.to?api_key=djvYMX3G_jA4IDf8";
+const SHYFT_MAINNET_RPC = process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC?.trim();
+const DEFAULT_CLUSTER: ClusterKind = "mainnet-beta";
 
 interface WalletProvider {
   isPhantom?: boolean;
@@ -659,7 +658,7 @@ export default function Page() {
   const [createStep, setCreateStep] = useState(0);
   const [templateId, setTemplateId] = useState(templates[0].id);
 
-  const [cluster, setCluster] = useState<ClusterKind>("devnet");
+  const [cluster, setCluster] = useState<ClusterKind>(DEFAULT_CLUSTER);
   const [customRpc, setCustomRpc] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -708,6 +707,40 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const persistedCluster = window.localStorage.getItem("grape_access_cluster");
+    const persistedCustomRpc = window.localStorage.getItem("grape_access_custom_rpc") ?? "";
+    if (
+      persistedCluster === "devnet" ||
+      persistedCluster === "testnet" ||
+      persistedCluster === "mainnet-beta" ||
+      persistedCluster === "custom"
+    ) {
+      setCluster(persistedCluster);
+    }
+    if (persistedCustomRpc) {
+      setCustomRpc(persistedCustomRpc);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem("grape_access_cluster", cluster);
+  }, [cluster]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem("grape_access_custom_rpc", customRpc);
+  }, [customRpc]);
+
+  useEffect(() => {
     const connectedPublicKey = wallet.publicKey;
     if (!connectedPublicKey) {
       return;
@@ -754,9 +787,22 @@ export default function Page() {
       return customRpc.trim();
     }
     if (cluster === "mainnet-beta") {
-      return SHYFT_MAINNET_RPC;
+      return SHYFT_MAINNET_RPC || clusterApiUrl("mainnet-beta");
     }
     return clusterApiUrl(cluster);
+  }, [cluster, customRpc]);
+
+  const rpcDisplayLabel = useMemo(() => {
+    if (cluster === "custom") {
+      return customRpc.trim() ? "Custom RPC configured" : "Custom RPC not set";
+    }
+    if (cluster === "mainnet-beta") {
+      return SHYFT_MAINNET_RPC ? "Shyft (preferred, hidden)" : "Solana Mainnet Public RPC";
+    }
+    if (cluster === "testnet") {
+      return "Solana Testnet Public RPC";
+    }
+    return "Solana Devnet Public RPC";
   }, [cluster, customRpc]);
 
   const connection = useMemo(() => {
@@ -2714,7 +2760,7 @@ export default function Page() {
                       </Button>
                     </Stack>
                     <Typography variant="caption" color="text.secondary" className="mono">
-                      RPC: {rpcEndpoint || "Not set"}
+                      RPC: {rpcDisplayLabel}
                     </Typography>
                     <Typography variant="caption" color="text.secondary" className="mono">
                       Load Status: {adminLoadStatus}
@@ -3099,15 +3145,15 @@ export default function Page() {
             </FormControl>
             <TextField
               fullWidth
-              label="RPC Endpoint"
-              value={cluster === "custom" ? customRpc : rpcEndpoint}
+              label={cluster === "custom" ? "RPC Endpoint" : "RPC Provider"}
+              value={cluster === "custom" ? customRpc : rpcDisplayLabel}
               onChange={(event) => setCustomRpc(event.target.value)}
               disabled={cluster !== "custom"}
               helperText={
                 cluster === "custom"
                   ? "Paste the full URL of your preferred RPC provider."
                   : cluster === "mainnet-beta"
-                    ? "Auto-filled with preferred Shyft mainnet RPC."
+                    ? "Using preferred Shyft mainnet RPC (URL hidden)."
                     : "Auto-filled from the selected Solana network."
               }
             />

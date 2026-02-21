@@ -80,15 +80,17 @@ Optional:
 
 - `NEXT_PUBLIC_WALLET_CONNECTOR_RPC`
   - If set, wallet connection provider uses this RPC endpoint.
-  - If not set, defaults to Solana devnet.
+  - If not set, defaults to `NEXT_PUBLIC_SHYFT_MAINNET_RPC` if present, otherwise Solana mainnet public RPC.
 - `NEXT_PUBLIC_SHYFT_MAINNET_RPC`
   - Preferred mainnet RPC used when `Mainnet Beta` is selected in Connection Settings.
-  - Defaults to `https://rpc.shyft.to?api_key=djvYMX3G_jA4IDf8` if not set.
+  - Keep this in environment variables rather than hardcoding in source.
 
 Example `.env.local`:
 
 ```bash
-NEXT_PUBLIC_WALLET_CONNECTOR_RPC=https://api.devnet.solana.com
+NEXT_PUBLIC_SHYFT_MAINNET_RPC=your_shyft_mainnet_rpc_url
+# Optional override:
+# NEXT_PUBLIC_WALLET_CONNECTOR_RPC=your_preferred_rpc_url
 ```
 
 ## Operator Quick Start
