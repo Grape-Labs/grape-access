@@ -1,39 +1,57 @@
 # Grape Access Console
 
-Grape Access Console is a Next.js + Material UI app for managing on-chain Grape Access gates on Solana using `@grapenpm/gpass-sdk`.
+Grape Access Console is a Next.js + Material UI app for operating Grape Access gates on Solana with `@grapenpm/gpass-sdk`.
 
-It provides a guided UI for:
-- Initializing gates
-- Checking user access
-- Managing wallet/network/RPC selection
-- Copying and reviewing transaction payloads
+It includes:
+- A gate creation flow for admins
+- A member self-serve portal
+- Admin lifecycle actions (load, inspect, activate/deactivate, transfer authority, close)
+- Moderator/debug check tools
 
-## Features
+## What It Does Today
 
-- Multi-wallet support via Solana Wallet Adapter (`Phantom`, `Solflare`, `Trust`)
-- Top-right wallet connect button and settings cog
-- Connection Settings dialog for network and custom RPC endpoint
-- Compact Program IDs strip with quick copy
-- Guided Create Gate flow (template -> configure -> review/initialize)
-- One-click Gate ID generation
-- Check Access flow with optional account inputs
-- Activity log with transaction signatures + Explorer links
-- Inline helper text for field purpose and usage
+- Create gates on-chain
+- Check access on-chain for members or arbitrary wallets
+- Manage existing gates from authority wallets
+- Share deep links for member checks: `/?gateId=<GATE_PUBLIC_KEY>`
+- Auto-derive common member accounts (reputation PDA, ATA, best-effort identity/link)
 
-## Tech Stack
+## Tabs
 
-- Next.js 15 (App Router)
-- React 19
-- TypeScript
-- Material UI
-- Solana Wallet Adapter
-- `@coral-xyz/anchor`
-- `@grapenpm/gpass-sdk`
+1. `Create Gate`
+- Template-driven setup
+- Criteria and gate type configuration
+- Payload review + initialize transaction
+
+2. `Member Portal`
+- Wallet-first self-check flow
+- `Auto-Derive Accounts`
+- Share link copy (`/?gateId=...`)
+
+3. `Check Access`
+- Moderator/operator check for any user wallet
+- Manual account overrides for troubleshooting
+
+4. `Admin Console`
+- Load gates by authority (read-only supported)
+- Fetch gate details
+- Apply active state
+- Transfer authority
+- Close check record / close gate (with confirmation)
+
+5. `Community Guide`
+- Built-in operator/member usage checklist
+
+## Program IDs Shown In UI
+
+- `Grape Access Program`
+- `OG Reputation Program`
+- `Grape Verification Program`
 
 ## Requirements
 
 - Node.js 18+
-- A Solana wallet extension (Phantom, Solflare, or Trust)
+- Browser wallet extension (Phantom, Solflare, or Trust)
 
 ## Install
 
@@ -41,35 +59,31 @@ It provides a guided UI for:
 npm install
 ```
 
-## Run (Development)
+## Run Locally
 
 ```bash
 npm run dev
 ```
 
-Open: `http://localhost:3000`
+Open `http://localhost:3000`.
 
-## Build
+## Production Build
 
 ```bash
 npm run build
 npm run start
 ```
 
-## Scripts
+## Environment Configuration
 
-- `npm run dev` - start dev server
-- `npm run build` - production build
-- `npm run start` - run production server
-- `npm run lint` - lint via Next
-
-## Configuration
-
-Optional environment variable:
+Optional:
 
 - `NEXT_PUBLIC_WALLET_CONNECTOR_RPC`
-  - If set, Wallet Adapter connection provider uses this RPC endpoint.
-  - If not set, defaults to Solana `devnet` endpoint.
+  - If set, wallet connection provider uses this RPC endpoint.
+  - If not set, defaults to Solana devnet.
+- `NEXT_PUBLIC_SHYFT_MAINNET_RPC`
+  - Preferred mainnet RPC used when `Mainnet Beta` is selected in Connection Settings.
+  - Defaults to `https://rpc.shyft.to?api_key=djvYMX3G_jA4IDf8` if not set.
 
 Example `.env.local`:
 
@@ -77,68 +91,86 @@ Example `.env.local`:
 NEXT_PUBLIC_WALLET_CONNECTOR_RPC=https://api.devnet.solana.com
 ```
 
-## How To Use
+## Operator Quick Start
 
-1. Connect wallet
-- Use the top-right wallet button.
-- Use an admin/authority wallet when creating or managing gates.
+1. Connect authority wallet.
+2. Set network/RPC from the top-right settings cog.
+3. Create a gate in `Create Gate`.
+4. Validate with:
+   - `Check Access` (known pass + known fail wallets)
+   - `Member Portal` (real member test)
+5. Share member deep link using `Copy Share Link`.
 
-2. Set network / RPC
-- Click the top-right cog button.
-- Choose `devnet`, `testnet`, `mainnet-beta`, or `custom`.
-- For `custom`, enter your RPC URL.
+## Field Clarifications
 
-3. Create a gate
-- Go to `Create Gate` tab.
-- Choose a template.
-- Configure criteria + gate type.
-- Use `Generate` in Gate ID input to create a unique on-chain gate ID.
-- Review payload and click `Initialize Gate`.
+- `Gate ID`: Unique gate identifier public key (not the gate PDA).
+- `OG Reputation Config`: Public key of your community OG Reputation config account.
+- `Grape Space`: Public key of your Grape Verification Space account (space PDA), not a wallet.
+- `Authority`: Wallet allowed to manage the gate.
 
-4. Check access
-- Go to `Check Access` tab.
-- Provide Gate ID + User public key.
-- Fill optional accounts only if your selected criteria requires them.
-- Click `Run Check`.
+## Member Auto-Derive Notes
 
-## Gate ID Explained
+Auto-derive can populate:
+- `reputationAccount` for reputation criteria
+- `tokenAccount` ATA for token-holding gates (`checkAta=true`)
+- best-effort `identityAccount` and `linkAccount` for verification criteria
 
-`Gate ID` is the unique public key identifier for a gate configuration.
+Identity/link derivation may still require correct identity input format depending on community verification setup.
 
-- It is not the gate PDA.
-- The program derives the gate PDA from Gate ID.
-- Each gate should use a fresh Gate ID.
+## Admin Load Gates Diagnostics
 
-## Notes On Authority Wallet
+Admin `Load Gates` now includes:
+- RPC probe before loading
+- UI status:
+  - `Load Status`
+  - `Last RPC Slot Probe`
+- read-only loading support (wallet not required for read actions)
 
-- If `Authority` is left empty during initialization, the connected wallet becomes authority.
-- Authority wallet is the signer used to manage the gate later (update, activate/deactivate, close).
+If load still returns empty:
+- verify network/RPC matches where gate was created
+- verify authority wallet filter matches gate authority
+- paste gate ID directly into `Selected Gate ID` and use `Fetch Gate Details`
 
 ## Troubleshooting
 
-### Wallet menu appears behind UI
-Wallet dropdown/modal z-index is already elevated in `app/globals.css`. If you customize layout containers, keep high z-index on wallet dropdown/modal classes.
+### Wallet modal/popup issues
+- Wallet modal layering is managed in `app/globals.css`.
+- If UI customizations are added, keep wallet modal container/wrapper above overlay.
 
-### Gate checks fail with missing account errors
-Some criteria require extra accounts:
-- Reputation criteria -> `reputationAccount`
-- Verification criteria -> `identityAccount`
-- Wallet-link verification -> `linkAccount`
-- Token holding -> `tokenAccount`
+### Missing required account errors on check
+Gate criteria may require:
+- `reputationAccount`
+- `identityAccount`
+- `linkAccount`
+- `tokenAccount`
 
-### Wrong network / RPC
-If transactions or account lookups fail unexpectedly, confirm the selected cluster and RPC endpoint in Connection Settings.
+Use Member Portal `Auto-Derive Accounts` first.
 
-### SDK method/client errors
-This app is wired to the installed `@grapenpm/gpass-sdk` `GpassClient` + Anchor provider flow. If you upgrade SDK versions, verify exported class/method names remain compatible.
+### SDK compatibility errors
+Console expects `@grapenpm/gpass-sdk` exports compatible with current `GpassClient` method calls.
 
-## Project Structure (high-level)
+## Deploy (Vercel)
 
-- `app/page.tsx` - main console UI and action handlers
-- `app/providers.tsx` - MUI theme + wallet providers
-- `app/layout.tsx` - app shell and fonts
-- `app/globals.css` - global styling and wallet overlay styles
+1. Push repository.
+2. Import project in Vercel.
+3. Set optional env var:
+   - `NEXT_PUBLIC_WALLET_CONNECTOR_RPC`
+4. Deploy.
+
+## Scripts
+
+- `npm run dev`
+- `npm run build`
+- `npm run start`
+- `npm run lint`
+
+## Project Structure
+
+- `app/page.tsx`: Main UI, actions, and SDK wiring
+- `app/providers.tsx`: MUI + wallet providers
+- `app/layout.tsx`: App shell/fonts
+- `app/globals.css`: Global styles and wallet modal styling
 
 ## License
 
-Private project codebase. Respect your organization's distribution and usage policy.
+Private project codebase. Respect your organization’s distribution and usage policy.

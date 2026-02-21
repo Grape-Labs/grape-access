@@ -63,6 +63,9 @@ type CriteriaKind =
 
 type GateTypeKind = "singleUse" | "reusable" | "timeLimited" | "subscription";
 type ClusterKind = "devnet" | "testnet" | "mainnet-beta" | "custom";
+const SHYFT_MAINNET_RPC =
+  process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC?.trim() ||
+  "https://rpc.shyft.to?api_key=djvYMX3G_jA4IDf8";
 
 interface WalletProvider {
   isPhantom?: boolean;
@@ -749,6 +752,9 @@ export default function Page() {
   const rpcEndpoint = useMemo(() => {
     if (cluster === "custom") {
       return customRpc.trim();
+    }
+    if (cluster === "mainnet-beta") {
+      return SHYFT_MAINNET_RPC;
     }
     return clusterApiUrl(cluster);
   }, [cluster, customRpc]);
@@ -3086,7 +3092,7 @@ export default function Page() {
               >
                 <MenuItem value="devnet">Devnet</MenuItem>
                 <MenuItem value="testnet">Testnet</MenuItem>
-                <MenuItem value="mainnet-beta">Mainnet Beta</MenuItem>
+                <MenuItem value="mainnet-beta">Mainnet Beta (Shyft Preferred)</MenuItem>
                 <MenuItem value="custom">Custom RPC</MenuItem>
               </Select>
               <FormHelperText>Select the Solana cluster this console should use.</FormHelperText>
@@ -3100,7 +3106,9 @@ export default function Page() {
               helperText={
                 cluster === "custom"
                   ? "Paste the full URL of your preferred RPC provider."
-                  : "Auto-filled from the selected Solana network."
+                  : cluster === "mainnet-beta"
+                    ? "Auto-filled with preferred Shyft mainnet RPC."
+                    : "Auto-filled from the selected Solana network."
               }
             />
           </Stack>
