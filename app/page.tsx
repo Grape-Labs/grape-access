@@ -493,7 +493,12 @@ async function sha256Text(text: string): Promise<Uint8Array> {
   return sha256Bytes(new TextEncoder().encode(text));
 }
 
-async function resolveSdkClient(connection: Connection, wallet: WalletProvider) {
+async function resolveSdkClient(
+  connection: Connection,
+  wallet: WalletProvider | undefined,
+  options?: { readOnly?: boolean }
+) {
+  const readOnly = options?.readOnly ?? false;
   const sdkAny = GPassSdk as Record<string, unknown>;
   const GpassClientCtor = sdkAny.GpassClient as
     | (new (...args: unknown[]) => unknown)
@@ -505,18 +510,21 @@ async function resolveSdkClient(connection: Connection, wallet: WalletProvider) 
     );
   }
 
-  if (!wallet.publicKey || !wallet.signTransaction) {
+  if (!readOnly && (!wallet?.publicKey || !wallet.signTransaction)) {
     throw new Error("Connected wallet does not support transaction signing.");
   }
 
+  const fallbackPublicKey = wallet?.publicKey ?? Keypair.generate().publicKey;
+  const signTransaction =
+    wallet?.signTransaction ??
+    (async (transaction: Transaction) => transaction);
   const signAllTransactions =
-    wallet.signAllTransactions ??
-    (async (transactions: Transaction[]) =>
-      Promise.all(transactions.map((tx) => wallet.signTransaction!(tx))));
+    wallet?.signAllTransactions ??
+    (async (transactions: Transaction[]) => Promise.all(transactions.map((tx) => signTransaction(tx))));
 
   const anchorWallet: AnchorCompatibleWallet = {
-    publicKey: wallet.publicKey,
-    signTransaction: wallet.signTransaction,
+    publicKey: fallbackPublicKey,
+    signTransaction,
     signAllTransactions
   };
 
@@ -678,6 +686,8 @@ export default function Page() {
   const [memberDeriveBusy, setMemberDeriveBusy] = useState(false);
   const [adminBusy, setAdminBusy] = useState<AdminBusyAction>("");
   const [adminConfirmAction, setAdminConfirmAction] = useState<AdminConfirmAction>("");
+  const [adminRpcProbeSlot, setAdminRpcProbeSlot] = useState<number | null>(null);
+  const [adminLoadStatus, setAdminLoadStatus] = useState("Ready");
   const deepLinkGateIdRef = useRef("");
 
   const [activity, setActivity] = useState<ActivityItem[]>([]);
@@ -877,15 +887,17 @@ export default function Page() {
     setActivity((prev) => [{ ...entry, createdAt: Date.now() }, ...prev]);
   };
 
-  const getAdminClient = async () => {
-    if (!wallet.publicKey || !connection) {
-      throw new Error("Connect wallet and choose a valid RPC endpoint first.");
+  const getAdminClient = async ({ readOnly = false }: { readOnly?: boolean } = {}) => {
+    if (!connection) {
+      throw new Error("Choose a valid RPC endpoint first.");
+    }
+    if (!readOnly && !wallet.publicKey) {
+      throw new Error("Connect wallet before running admin write actions.");
     }
 
-    return (await resolveSdkClient(
-      connection,
-      wallet as unknown as WalletProvider
-    )) as Record<string, unknown>;
+    return (await resolveSdkClient(connection, wallet as unknown as WalletProvider, {
+      readOnly
+    })) as Record<string, unknown>;
   };
 
   const getMemberClient = async () => {
@@ -893,10 +905,10 @@ export default function Page() {
       throw new Error("Connect wallet and choose a valid RPC endpoint first.");
     }
 
-    return (await resolveSdkClient(
-      connection,
-      wallet as unknown as WalletProvider
-    )) as Record<string, unknown>;
+    return (await resolveSdkClient(connection, wallet as unknown as WalletProvider)) as Record<
+      string,
+      unknown
+    >;
   };
 
   const setMemberGateId = (value: string) => {
@@ -1425,16 +1437,58 @@ export default function Page() {
       "";
     const authority = parsePublicKey("Authority filter", authorityValue, true)!;
 
-    const client = await getAdminClient();
+    const client = await getAdminClient({ readOnly: true });
     const method = client.fetchGatesByAuthority as
       | ((authorityKey: PublicKey) => Promise<unknown[]>)
       | undefined;
 
-    if (typeof method !== "function") {
-      throw new Error("SDK client is missing fetchGatesByAuthority.");
+    let gates: unknown[] = [];
+    let usedFallbackScan = false;
+    let primaryError: Error | undefined;
+
+    if (typeof method === "function") {
+      try {
+        const methodResult = await method.call(client, authority);
+        gates = Array.isArray(methodResult) ? methodResult : [];
+      } catch (error) {
+        primaryError = error instanceof Error ? error : new Error("Unknown SDK fetch error.");
+      }
     }
 
-    const gates = await method.call(client, authority);
+    if (gates.length === 0) {
+      const clientAny = client as Record<string, any>;
+      const gateAccountClient = clientAny.program?.account?.Gate ?? clientAny.program?.account?.gate;
+      const allMethod = gateAccountClient?.all as (() => Promise<unknown[]>) | undefined;
+      if (typeof allMethod === "function") {
+        try {
+          const allGateAccounts = await allMethod.call(gateAccountClient);
+          const authorityBase58 = authority.toBase58();
+          gates = (Array.isArray(allGateAccounts) ? allGateAccounts : []).filter((entry: any) => {
+            const accountAuthority =
+              entry?.account?.authority && typeof entry.account.authority.toBase58 === "function"
+                ? entry.account.authority.toBase58()
+                : "";
+            return accountAuthority === authorityBase58;
+          });
+          usedFallbackScan = true;
+        } catch (error) {
+          const fallbackError = error instanceof Error ? error.message : "unknown fallback error";
+          if (primaryError) {
+            throw new Error(
+              `SDK authority fetch failed (${primaryError.message}) and fallback scan failed (${fallbackError}).`
+            );
+          }
+          throw new Error(`Fallback gate scan failed: ${fallbackError}`);
+        }
+      }
+    }
+
+    if (!method && !usedFallbackScan) {
+      throw new Error("SDK client is missing fetchGatesByAuthority.");
+    }
+    if (method && primaryError && !usedFallbackScan && gates.length === 0) {
+      throw new Error(`SDK authority fetch failed: ${primaryError.message}`);
+    }
     const mapped: AdminGateItem[] = (Array.isArray(gates) ? gates : []).map((entry: any) => {
       const account = entry.account ?? {};
       return {
@@ -1476,7 +1530,10 @@ export default function Page() {
     }));
 
     if (showSuccessToast) {
-      notify(`Loaded ${mapped.length} gate(s).`, "success");
+      notify(
+        `Loaded ${mapped.length} gate(s).${usedFallbackScan ? " Used fallback RPC scan." : ""}`,
+        "success"
+      );
     }
 
     return mapped;
@@ -1490,7 +1547,7 @@ export default function Page() {
     showSuccessToast?: boolean;
   } = {}) => {
     const gateId = parsePublicKey("Selected gate", gateIdInput ?? adminForm.selectedGateId, true)!;
-    const client = await getAdminClient();
+    const client = await getAdminClient({ readOnly: true });
     const method = client.fetchGate as ((gate: PublicKey) => Promise<unknown>) | undefined;
 
     if (typeof method !== "function") {
@@ -1519,10 +1576,25 @@ export default function Page() {
 
   const handleLoadGatesByAuthority = async () => {
     setAdminBusy("loadGates");
+    setAdminLoadStatus("Probing RPC...");
     try {
+      if (!connection) {
+        throw new Error("No RPC connection available. Check network/RPC settings.");
+      }
+
+      const probeSlot = await connection.getSlot("processed");
+      setAdminRpcProbeSlot(probeSlot);
+      setAdminLoadStatus(`RPC probe OK at slot ${probeSlot}. Loading gates...`);
+      if (typeof window !== "undefined") {
+        console.info("[Grape Access][Admin] Load Gates RPC probe slot:", probeSlot);
+      }
+
       await loadGatesByAuthority();
+      setAdminLoadStatus("Gates loaded.");
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Failed to load gates.", "error");
+      const message = error instanceof Error ? error.message : "Failed to load gates.";
+      setAdminLoadStatus(`Load failed: ${message}`);
+      notify(message, "error");
     } finally {
       setAdminBusy("");
     }
@@ -2623,7 +2695,7 @@ export default function Page() {
                       <Button
                         variant="contained"
                         onClick={handleLoadGatesByAuthority}
-                        disabled={adminBusy !== "" || !connection || !isWalletConnected}
+                        disabled={adminBusy !== "" || !connection}
                       >
                         {adminBusy === "loadGates" ? "Loading..." : "Load Gates"}
                       </Button>
@@ -2635,6 +2707,15 @@ export default function Page() {
                         Use Connected
                       </Button>
                     </Stack>
+                    <Typography variant="caption" color="text.secondary" className="mono">
+                      RPC: {rpcEndpoint || "Not set"}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" className="mono">
+                      Load Status: {adminLoadStatus}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" className="mono">
+                      Last RPC Slot Probe: {adminRpcProbeSlot ?? "n/a"}
+                    </Typography>
 
                     <Stack direction="row" spacing={1}>
                       <Paper variant="outlined" sx={{ p: 1, flex: 1 }}>
@@ -2693,7 +2774,9 @@ export default function Page() {
                 <Grid size={{ xs: 12, md: 8 }}>
                   <Stack spacing={2}>
                     {!isWalletConnected && (
-                      <Alert severity="info">Connect an authority wallet to run admin actions.</Alert>
+                      <Alert severity="info">
+                        You can load/fetch gates in read-only mode. Connect wallet only for write actions.
+                      </Alert>
                     )}
                     {isWalletConnected && selectedAdminGate && !isSelectedGateAuthority && (
                       <Alert severity="warning">
@@ -2705,20 +2788,34 @@ export default function Page() {
                       </Alert>
                     )}
 
+                    <TextField
+                      fullWidth
+                      label="Selected Gate ID"
+                      value={adminForm.selectedGateId}
+                      onChange={(event) => updateAdminForm("selectedGateId", event.target.value)}
+                      helperText="Paste gate ID manually if it does not appear in the authority list."
+                    />
                     <FormControl fullWidth>
-                      <InputLabel>Selected Gate</InputLabel>
+                      <InputLabel>Choose From Loaded Gates</InputLabel>
                       <Select
-                        label="Selected Gate"
-                        value={adminForm.selectedGateId}
+                        label="Choose From Loaded Gates"
+                        value={
+                          adminGates.some((gate) => gate.gateId === adminForm.selectedGateId)
+                            ? adminForm.selectedGateId
+                            : ""
+                        }
                         onChange={(event) => updateAdminForm("selectedGateId", event.target.value)}
                       >
+                        <MenuItem value="" disabled>
+                          {adminGates.length ? "Select a loaded gate" : "No gates loaded"}
+                        </MenuItem>
                         {adminGates.map((gate) => (
                           <MenuItem key={gate.pda} value={gate.gateId}>
                             {gate.gateId}
                           </MenuItem>
                         ))}
                       </Select>
-                      <FormHelperText>Choose a gate to manage.</FormHelperText>
+                      <FormHelperText>Optional quick picker from the loaded gate list.</FormHelperText>
                     </FormControl>
 
                     <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
