@@ -200,6 +200,7 @@ const {
   VerificationPlatform,
   GateCriteriaFactory,
   GateTypeFactory,
+  findGatePda,
   findVineReputationPda,
   findGrapeIdentityPda,
   findGrapeLinkPda
@@ -1602,20 +1603,56 @@ export default function Page() {
     const client = await getAdminClient({ readOnly: true });
     const method = client.fetchGate as ((gate: PublicKey) => Promise<unknown>) | undefined;
 
-    if (typeof method !== "function") {
-      throw new Error("SDK client is missing fetchGate.");
+    const [gatePda] = await findGatePda(gateId, GPASS_PROGRAM_ID);
+    let gate: unknown = null;
+    let primaryError: Error | undefined;
+
+    if (typeof method === "function") {
+      try {
+        gate = await method.call(client, gateId);
+      } catch (error) {
+        primaryError = error instanceof Error ? error : new Error("Unknown SDK fetchGate error.");
+      }
     }
 
-    const gate = await method.call(client, gateId);
     if (!gate) {
-      setAdminGateDetails(null);
+      const clientAny = client as Record<string, any>;
+      const gateAccountClient = clientAny.program?.account?.Gate ?? clientAny.program?.account?.gate;
+      const fetchNullable =
+        gateAccountClient?.fetchNullable as ((address: PublicKey) => Promise<unknown>) | undefined;
+      const fetchStrict = gateAccountClient?.fetch as ((address: PublicKey) => Promise<unknown>) | undefined;
+
+      try {
+        if (typeof fetchNullable === "function") {
+          gate = await fetchNullable.call(gateAccountClient, gatePda);
+        } else if (typeof fetchStrict === "function") {
+          gate = await fetchStrict.call(gateAccountClient, gatePda);
+        }
+      } catch {
+        gate = null;
+      }
+    }
+
+    if (!gate) {
+      const detailPayload = {
+        error: "Gate not found on this network/RPC.",
+        gateId: gateId.toBase58(),
+        gatePda: gatePda.toBase58(),
+        rpc: rpcDisplayLabel,
+        hint: "Verify cluster/RPC and ensure this gate was created on that network.",
+        sdkError: primaryError?.message
+      };
+      setAdminGateDetails(detailPayload);
       if (showSuccessToast) {
-        notify("Gate not found.", "info");
+        notify("Gate not found on this network/RPC.", "info");
       }
       return null;
     }
 
-    const display = toDisplayValue(gate) as Record<string, unknown>;
+    const display = toDisplayValue({
+      ...(gate as Record<string, unknown>),
+      gatePda: gatePda.toBase58()
+    }) as Record<string, unknown>;
     setAdminGateDetails(display);
     if (typeof display.isActive === "boolean") {
       updateAdminForm("setActiveValue", display.isActive);
@@ -3011,7 +3048,9 @@ export default function Page() {
                         className="mono"
                         sx={{ m: 0, fontSize: "0.78rem", color: "text.primary" }}
                       >
-                        {JSON.stringify(adminGateDetails, null, 2) || "No gate details loaded."}
+                        {adminGateDetails
+                          ? JSON.stringify(adminGateDetails, null, 2)
+                          : "No gate details loaded."}
                       </Typography>
                     </Paper>
                   </Stack>
