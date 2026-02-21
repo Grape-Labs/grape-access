@@ -122,12 +122,22 @@ body::after {
   z-index: 1600 !important;
 }
 
-.wallet-adapter-modal-overlay {
-  z-index: 1700 !important;
-}
-
 .wallet-adapter-modal {
   z-index: 1710 !important;
+}
+
+.wallet-adapter-modal-container {
+  position: relative;
+  z-index: 2 !important;
+}
+
+.wallet-adapter-modal-wrapper {
+  position: relative;
+  z-index: 3 !important;
+}
+
+.wallet-adapter-modal-overlay {
+  z-index: 1 !important;
 }
 
 @keyframes shell-enter {
