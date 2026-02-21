@@ -910,6 +910,23 @@ export default function Page() {
     [memberForm, connectedWalletAddress]
   );
 
+  const selectedGateShareLink = useMemo(() => {
+    const gateId = adminForm.selectedGateId.trim();
+    if (!gateId || typeof window === "undefined") {
+      return "";
+    }
+
+    try {
+      parsePublicKey("Gate ID", gateId, true);
+    } catch {
+      return "";
+    }
+
+    const url = new URL(window.location.origin + window.location.pathname);
+    url.searchParams.set("gateId", gateId);
+    return url.toString();
+  }, [adminForm.selectedGateId]);
+
   const notify = (message: string, severity: "success" | "error" | "info") => {
     setSnackbarMessage(message);
     setSnackbarSeverity(severity);
@@ -982,24 +999,46 @@ export default function Page() {
     window.history.replaceState({}, "", `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
   };
 
-  const copyMemberShareLink = async () => {
-    const gateId = memberForm.gateId.trim();
+  const buildMemberGateLink = (gateIdRaw: string) => {
+    const gateId = gateIdRaw.trim();
     if (!gateId) {
-      notify("Enter a gate ID before copying a share link.", "error");
-      return;
+      return "";
     }
+    parsePublicKey("Gate ID", gateId, true);
+    if (typeof window === "undefined") {
+      return "";
+    }
+    const url = new URL(window.location.origin + window.location.pathname);
+    url.searchParams.set("gateId", gateId);
+    return url.toString();
+  };
+
+  const copyMemberShareLinkForGate = async (gateIdRaw: string) => {
     try {
-      parsePublicKey("Gate ID", gateId, true);
-      if (typeof window === "undefined") {
-        throw new Error("Window unavailable.");
+      const link = buildMemberGateLink(gateIdRaw);
+      if (!link) {
+        throw new Error("Gate ID is required before copying a share link.");
       }
-      const url = new URL(window.location.href);
-      url.searchParams.set("gateId", gateId);
-      await navigator.clipboard.writeText(url.toString());
+      await navigator.clipboard.writeText(link);
       notify("Share link copied.", "success");
     } catch (error) {
       notify(error instanceof Error ? error.message : "Failed to copy share link.", "error");
     }
+  };
+
+  const openMemberPortalForGate = (gateIdRaw: string) => {
+    try {
+      const gateId = parsePublicKey("Gate ID", gateIdRaw, true)!.toBase58();
+      setMemberGateId(gateId);
+      setTab(1);
+      notify("Opened Member Portal for selected gate.", "info");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Invalid gate ID.", "error");
+    }
+  };
+
+  const copyMemberShareLink = async () => {
+    await copyMemberShareLinkForGate(memberForm.gateId);
   };
 
   const handleAutoDeriveMemberAccounts = async (
@@ -2842,20 +2881,29 @@ export default function Page() {
                           </Typography>
                         )}
                         {adminGates.map((gate) => (
-                          <Button
-                            key={gate.pda}
-                            variant={adminForm.selectedGateId === gate.gateId ? "contained" : "outlined"}
-                            color={gate.isActive ? "primary" : "secondary"}
-                            onClick={() => updateAdminForm("selectedGateId", gate.gateId)}
-                            sx={{ justifyContent: "space-between" }}
-                          >
-                            <Box component="span" className="mono" sx={{ fontSize: "0.72rem" }}>
-                              {gate.gateId.slice(0, 8)}...{gate.gateId.slice(-6)}
-                            </Box>
-                            <Box component="span" sx={{ fontSize: "0.72rem" }}>
-                              {gate.successfulChecks}/{gate.totalChecks}
-                            </Box>
-                          </Button>
+                          <Stack key={gate.pda} direction="row" spacing={0.6} alignItems="center">
+                            <Button
+                              variant={adminForm.selectedGateId === gate.gateId ? "contained" : "outlined"}
+                              color={gate.isActive ? "primary" : "secondary"}
+                              onClick={() => updateAdminForm("selectedGateId", gate.gateId)}
+                              sx={{ justifyContent: "space-between", flex: 1 }}
+                            >
+                              <Box component="span" className="mono" sx={{ fontSize: "0.72rem" }}>
+                                {gate.gateId.slice(0, 8)}...{gate.gateId.slice(-6)}
+                              </Box>
+                              <Box component="span" sx={{ fontSize: "0.72rem" }}>
+                                {gate.successfulChecks}/{gate.totalChecks}
+                              </Box>
+                            </Button>
+                            <Tooltip title="Copy member link">
+                              <IconButton
+                                size="small"
+                                onClick={() => void copyMemberShareLinkForGate(gate.gateId)}
+                              >
+                                <ContentCopyRoundedIcon fontSize="inherit" />
+                              </IconButton>
+                            </Tooltip>
+                          </Stack>
                         ))}
                       </Stack>
                     </Paper>
@@ -2885,6 +2933,29 @@ export default function Page() {
                       value={adminForm.selectedGateId}
                       onChange={(event) => updateAdminForm("selectedGateId", event.target.value)}
                       helperText="Paste gate ID manually if it does not appear in the authority list."
+                    />
+                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
+                      <Button
+                        variant="outlined"
+                        onClick={() => void copyMemberShareLinkForGate(adminForm.selectedGateId)}
+                        disabled={!adminForm.selectedGateId}
+                      >
+                        Copy Member Link
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        onClick={() => openMemberPortalForGate(adminForm.selectedGateId)}
+                        disabled={!adminForm.selectedGateId}
+                      >
+                        Open In Member Portal
+                      </Button>
+                    </Stack>
+                    <TextField
+                      fullWidth
+                      label="Member Link Preview"
+                      value={selectedGateShareLink}
+                      InputProps={{ readOnly: true }}
+                      helperText="Share this link with community members so gate ID is prefilled."
                     />
                     <FormControl fullWidth>
                       <InputLabel>Choose From Loaded Gates</InputLabel>
