@@ -15,7 +15,9 @@ const ibmPlexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://grape-access.vercel.app"),
+  metadataBase: new URL(
+    process.env.NEXT_PUBLIC_SITE_URL?.trim() || "https://grape-access.vercel.app"
+  ),
   title: "Grape Access Console",
   description:
     "Grape Access with verification and OG reputation gating on Solana.",
