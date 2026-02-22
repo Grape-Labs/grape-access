@@ -15,9 +15,39 @@ const ibmPlexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Grape Access UI",
+  metadataBase: new URL("https://grape-access.vercel.app"),
+  title: "Grape Access Console",
   description:
-    "Grape Access with Verification & Reputation all on Mainnet on Solana."
+    "Grape Access with verification and OG reputation gating on Solana.",
+  icons: {
+    icon: "/images/favicon.ico",
+    shortcut: "/images/favicon.ico",
+    apple: "/images/grapelogo512.png"
+  },
+  openGraph: {
+    title: "Grape Access Console",
+    description:
+      "Manage access gates, verify eligibility, and share gate links with your community on Solana.",
+    url: "/",
+    siteName: "Grape Access Console",
+    images: [
+      {
+        url: "/images/grapelogo512.png",
+        width: 512,
+        height: 512,
+        alt: "Grape Access"
+      }
+    ],
+    locale: "en_US",
+    type: "website"
+  },
+  twitter: {
+    card: "summary",
+    title: "Grape Access Console",
+    description:
+      "Manage access gates, verify eligibility, and share gate links with your community on Solana.",
+    images: ["/images/grapelogo512.png"]
+  }
 };
 
 export default function RootLayout({
