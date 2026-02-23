@@ -11,3 +11,8 @@
 
 # typescript
 *.tsbuildinfo
+
+# env files
+.env
+.env.*
+!.env.example

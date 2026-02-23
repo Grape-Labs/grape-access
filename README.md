@@ -51,7 +51,7 @@ It includes:
 ## Requirements
 
 - Node.js 18+
-- Browser wallet extension (Phantom, Solflare, or Trust)
+- Browser wallet extension (Phantom or Solflare)
 
 ## Install
 
