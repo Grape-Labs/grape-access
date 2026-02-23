@@ -1,6 +1,6 @@
 # Grape Access Console
 
-Grape Access Console is a Next.js + Material UI app for operating Grape Access gates on Solana with `@grapenpm/gpass-sdk`.
+Grape Access Console is a Next.js + Material UI app for operating Grape Access gates on Solana with `@grapenpm/grape-access-sdk`.
 
 It includes:
 - A gate creation flow for admins
@@ -149,7 +149,7 @@ Gate criteria may require:
 Use Member Portal `Auto-Derive Accounts` first.
 
 ### SDK compatibility errors
-Console expects `@grapenpm/gpass-sdk` exports compatible with current `GpassClient` method calls.
+Console expects `@grapenpm/grape-access-sdk` exports compatible with current `GpassClient` method calls.
 
 ## Deploy (Vercel)
 

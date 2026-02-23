@@ -48,7 +48,7 @@ import { AnchorProvider } from "@coral-xyz/anchor";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { Connection, Keypair, PublicKey, Transaction, clusterApiUrl } from "@solana/web3.js";
-import * as GPassSdk from "@grapenpm/gpass-sdk";
+import * as GPassSdk from "@grapenpm/grape-access-sdk";
 
 type CriteriaKind =
   | "minReputation"
@@ -65,7 +65,7 @@ type GateTypeKind = "singleUse" | "reusable" | "timeLimited" | "subscription";
 type ClusterKind = "devnet" | "testnet" | "mainnet-beta" | "custom";
 const SHYFT_MAINNET_RPC =
   process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC?.trim() ||
-  "https://rpc.shyft.to?api_key=djvYMX3G_jA4IDf8";
+  "https://api.mainnet-beta.solana.com";
 const DEFAULT_CLUSTER: ClusterKind = "mainnet-beta";
 
 interface WalletProvider {
@@ -511,7 +511,7 @@ async function resolveSdkClient(
 
   if (typeof GpassClientCtor !== "function") {
     throw new Error(
-      "Installed SDK does not export GpassClient. Please update @grapenpm/gpass-sdk."
+      "Installed SDK does not export GpassClient. Please update @grapenpm/grape-access-sdk."
     );
   }
 
@@ -558,7 +558,7 @@ async function executeSdkMethod({
 
   if (typeof method !== "function") {
     throw new Error(
-      `SDK client is missing ${methodName}. Please verify @grapenpm/gpass-sdk version.`
+      `SDK client is missing ${methodName}. Please verify @grapenpm/grape-access-sdk version.`
     );
   }
 
