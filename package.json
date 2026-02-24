@@ -12,7 +12,7 @@
     "@coral-xyz/anchor": "^0.29.0",
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
-    "@grapenpm/grape-access-sdk": "0.1.0",
+    "@grapenpm/grape-access-sdk": "^0.1.2",
     "@grapenpm/grape-verification-registry": "^0.2.1",
     "@grapenpm/vine-reputation-client": "^0.1.38",
     "@mui/icons-material": "^6.4.2",

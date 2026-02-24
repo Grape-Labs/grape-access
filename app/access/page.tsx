@@ -120,6 +120,18 @@ interface IdentitySeedCandidate {
   idHash: Uint8Array;
 }
 
+interface ParsedVerificationIdentity {
+  version: number;
+  space: PublicKey;
+  platform: number;
+  idHash: Uint8Array;
+  verified: boolean;
+  verifiedAt: number;
+  expiresAt: number;
+  attestedBy: PublicKey;
+  bump: number;
+}
+
 const DEFAULT_COMMUNITY_PROFILE: CommunityProfile = {
   name: "Grape Community Access",
   subtitle: "Community-verified access powered by on-chain gate checks.",
@@ -332,6 +344,68 @@ function asNumberValue(value: unknown): number | undefined {
   return undefined;
 }
 
+function readU16Le(bytes: Uint8Array, offset: number): number {
+  if (offset + 2 > bytes.length) {
+    throw new Error("u16 out of bounds");
+  }
+  return bytes[offset] | (bytes[offset + 1] << 8);
+}
+
+function readU64Le(bytes: Uint8Array, offset: number): bigint {
+  if (offset + 8 > bytes.length) {
+    throw new Error("u64 out of bounds");
+  }
+  let value = BigInt(0);
+  for (let index = 7; index >= 0; index -= 1) {
+    value = (value << BigInt(8)) + BigInt(bytes[offset + index]);
+  }
+  return value;
+}
+
+function readI64Le(bytes: Uint8Array, offset: number): number {
+  if (offset + 8 > bytes.length) {
+    throw new Error("i64 out of bounds");
+  }
+  return Number(Buffer.from(bytes.subarray(offset, offset + 8)).readBigInt64LE(0));
+}
+
+async function decodeVineReputationFlexible(data: Uint8Array | Buffer) {
+  try {
+    const decoded = await VineReputationClient.decodeReputation(data);
+    return {
+      user: decoded.user,
+      season: decoded.season,
+      points: decoded.points,
+      lastUpdateSlot: decoded.lastUpdateSlot,
+      layout: "legacy" as const
+    };
+  } catch {
+    const bytes = Uint8Array.from(data);
+    // Newer layout observed in vine-reputation-client internals:
+    // [8..9]=version, [9..41]=config, [41..73]=user, [73..75]=season, [75..83]=points, [83..91]=lastUpdate
+    if (bytes.length >= 91) {
+      let offset = 8;
+      offset += 1; // version
+      offset += 32; // config
+      const user = new PublicKey(bytes.subarray(offset, offset + 32));
+      offset += 32;
+      const season = readU16Le(bytes, offset);
+      offset += 2;
+      const points = readU64Le(bytes, offset);
+      offset += 8;
+      const lastUpdateSlot = readU64Le(bytes, offset);
+      return {
+        user,
+        season,
+        points,
+        lastUpdateSlot,
+        layout: "extended" as const
+      };
+    }
+    throw new Error("Unsupported reputation account layout.");
+  }
+}
+
 async function sha256Bytes(bytes: Uint8Array): Promise<Uint8Array> {
   if (!globalThis.crypto?.subtle) {
     throw new Error("Web Crypto API unavailable in this browser.");
@@ -369,19 +443,41 @@ function uniqueByteArrays(values: Uint8Array[]): Uint8Array[] {
 
 function extractVerificationSaltCandidates(spaceData: Uint8Array): Uint8Array[] {
   const salts: Uint8Array[] = [];
+  if (spaceData.length >= 72) {
+    salts.push(Uint8Array.from(spaceData.subarray(40, 72)));
+  }
   if (spaceData.length >= 105) {
     salts.push(Uint8Array.from(spaceData.subarray(73, 105)));
   }
   if (spaceData.length >= 73) {
     salts.push(Uint8Array.from(spaceData.subarray(41, 73)));
   }
+  if (spaceData.length >= 137) {
+    salts.push(Uint8Array.from(spaceData.subarray(105, 137)));
+  }
+  if (spaceData.length >= 138) {
+    salts.push(Uint8Array.from(spaceData.subarray(106, 138)));
+  }
+  if (spaceData.length >= 139) {
+    salts.push(Uint8Array.from(spaceData.subarray(107, 139)));
+  }
   return uniqueByteArrays(salts);
 }
 
 function identityBelongsToSpace(identityData: Uint8Array, grapeSpace: PublicKey) {
   const spaceBytes = grapeSpace.toBytes();
+  if (identityData.length >= 40) {
+    if (byteArraysEqual(identityData.subarray(8, 40), spaceBytes)) {
+      return true;
+    }
+  }
   if (identityData.length >= 41) {
     if (byteArraysEqual(identityData.subarray(9, 41), spaceBytes)) {
+      return true;
+    }
+  }
+  if (identityData.length >= 72) {
+    if (byteArraysEqual(identityData.subarray(40, 72), spaceBytes)) {
       return true;
     }
   }
@@ -391,6 +487,117 @@ function identityBelongsToSpace(identityData: Uint8Array, grapeSpace: PublicKey)
     }
   }
   return false;
+}
+
+function parseVerificationIdentityData(
+  identityData: Uint8Array | Buffer
+): ParsedVerificationIdentity | null {
+  const bytes = Uint8Array.from(identityData);
+  for (const offset of [8, 0]) {
+    if (bytes.length < offset + 120) {
+      continue;
+    }
+    try {
+      const version = bytes[offset];
+      const space = new PublicKey(bytes.subarray(offset + 1, offset + 33));
+      const platform = bytes[offset + 33];
+      const idHash = Uint8Array.from(bytes.subarray(offset + 34, offset + 66));
+      const verifiedRaw = bytes[offset + 66];
+      if (verifiedRaw !== 0 && verifiedRaw !== 1) {
+        continue;
+      }
+      const verified = verifiedRaw === 1;
+      const verifiedAt = readI64Le(bytes, offset + 67);
+      const expiresAt = readI64Le(bytes, offset + 75);
+      const attestedBy = new PublicKey(bytes.subarray(offset + 83, offset + 115));
+      const bump = bytes[offset + 115];
+      return {
+        version,
+        space,
+        platform,
+        idHash,
+        verified,
+        verifiedAt,
+        expiresAt,
+        attestedBy,
+        bump
+      };
+    } catch {
+      // Ignore and try fallback offset.
+    }
+  }
+  return null;
+}
+
+function getIdentityGateEligibilityIssue(args: {
+  identityData: Uint8Array | Buffer;
+  grapeSpace: PublicKey;
+  allowedPlatforms: number[];
+  nowUnix: number;
+}): string | null {
+  const { identityData, grapeSpace, allowedPlatforms, nowUnix } = args;
+  const parsed = parseVerificationIdentityData(identityData);
+  if (!parsed) {
+    return "Identity account data could not be parsed.";
+  }
+  if (!parsed.space.equals(grapeSpace)) {
+    return "Identity account does not belong to this gate's verification space.";
+  }
+  if (!parsed.verified) {
+    return "Identity account is not currently verified.";
+  }
+  if (parsed.expiresAt > 0 && nowUnix > parsed.expiresAt) {
+    return "Identity verification is expired.";
+  }
+  if (allowedPlatforms.length > 0 && !allowedPlatforms.includes(parsed.platform)) {
+    return `Identity platform ${parsed.platform} is not allowed by this gate.`;
+  }
+  return null;
+}
+
+function discoverVerificationDaoOffsets(spaceData: Uint8Array, resolvedSpace: PublicKey) {
+  const discoveredDaoOffsets: Array<{ offset: number; daoId: PublicKey }> = [];
+  for (let offset = 0; offset + 32 <= spaceData.length; offset += 1) {
+    try {
+      const daoId = new PublicKey(spaceData.subarray(offset, offset + 32));
+      const [derivedSpace] = GrapeVerificationRegistry.deriveSpacePda(daoId);
+      if (!derivedSpace.equals(resolvedSpace)) {
+        continue;
+      }
+      if (discoveredDaoOffsets.some((entry) => entry.daoId.equals(daoId))) {
+        continue;
+      }
+      discoveredDaoOffsets.push({ offset, daoId });
+    } catch {
+      // Ignore invalid windows.
+    }
+  }
+  return discoveredDaoOffsets;
+}
+
+function extractVerificationSaltCandidatesForResolvedSpace(
+  spaceData: Uint8Array,
+  resolvedSpace: PublicKey
+) {
+  const salts = extractVerificationSaltCandidates(spaceData);
+  const discoveredDaoOffsets = discoverVerificationDaoOffsets(spaceData, resolvedSpace);
+  const pushIfPresent = (start: number) => {
+    if (start < 0 || start + 32 > spaceData.length) {
+      return;
+    }
+    salts.push(Uint8Array.from(spaceData.subarray(start, start + 32)));
+  };
+
+  for (const entry of discoveredDaoOffsets) {
+    // Known layouts observed in the wild:
+    // - identity/hash salt at dao_offset + 32
+    // - secondary salt variants at dao_offset + 64 and dao_offset + 98
+    pushIfPresent(entry.offset + 32);
+    pushIfPresent(entry.offset + 64);
+    pushIfPresent(entry.offset + 98);
+  }
+
+  return uniqueByteArrays(salts);
 }
 
 function extractVerificationLinkContexts(args: {
@@ -415,25 +622,32 @@ function extractVerificationLinkContexts(args: {
     contexts.push({ daoId, salt: Uint8Array.from(salt) });
   };
 
-  if (spaceData.length >= 73) {
-    pushContext(
-      new PublicKey(spaceData.subarray(9, 41)),
-      Uint8Array.from(spaceData.subarray(41, 73))
-    );
-  }
-  if (spaceData.length >= 105) {
-    pushContext(
-      new PublicKey(spaceData.subarray(41, 73)),
-      Uint8Array.from(spaceData.subarray(73, 105))
-    );
+  const pushContextByOffsets = (daoStart: number, saltStart: number) => {
+    if (spaceData.length < saltStart + 32) {
+      return;
+    }
+    try {
+      pushContext(
+        new PublicKey(spaceData.subarray(daoStart, daoStart + 32)),
+        Uint8Array.from(spaceData.subarray(saltStart, saltStart + 32))
+      );
+    } catch {
+      // Ignore invalid bytes that are not a valid public key.
+    }
+  };
+
+  const discoveredDaoOffsets = discoverVerificationDaoOffsets(spaceData, resolvedSpace);
+
+  for (const entry of discoveredDaoOffsets) {
+    pushContextByOffsets(entry.offset, entry.offset + 32);
+    pushContextByOffsets(entry.offset, entry.offset + 64);
   }
 
-  if (contexts.length === 0) {
-    const [derivedFromInput] = GrapeVerificationRegistry.deriveSpacePda(grapeSpaceInput);
-    if (derivedFromInput.equals(resolvedSpace)) {
-      for (const salt of extractVerificationSaltCandidates(spaceData)) {
-        pushContext(grapeSpaceInput, salt);
-      }
+  const saltCandidates = extractVerificationSaltCandidates(spaceData);
+  const [derivedFromInput] = GrapeVerificationRegistry.deriveSpacePda(grapeSpaceInput);
+  if (contexts.length === 0 && derivedFromInput.equals(resolvedSpace)) {
+    for (const salt of saltCandidates) {
+      pushContext(grapeSpaceInput, salt);
     }
   }
 
@@ -447,7 +661,7 @@ function extractIdentitySeedCandidatesFromAccount(args: {
 }): IdentitySeedCandidate[] {
   const { identityAccount, identityData, grapeSpace } = args;
   const candidates: IdentitySeedCandidate[] = [];
-  for (const offset of [41, 73]) {
+  for (const offset of [40, 41, 72, 73]) {
     if (identityData.length < offset + 33) {
       continue;
     }
@@ -471,6 +685,31 @@ function extractIdentitySeedCandidatesFromAccount(args: {
     }
     candidates.push({ platformSeed, idHash });
   }
+
+  if (candidates.length === 0) {
+    for (let offset = 0; offset + 33 <= identityData.length; offset += 1) {
+      const platformSeed = identityData[offset];
+      const idHash = Uint8Array.from(identityData.subarray(offset + 1, offset + 33));
+      const [derivedIdentity] = GrapeVerificationRegistry.deriveIdentityPda(
+        grapeSpace,
+        platformSeed,
+        idHash
+      );
+      if (!derivedIdentity.equals(identityAccount)) {
+        continue;
+      }
+      if (
+        candidates.some(
+          (entry) =>
+            entry.platformSeed === platformSeed && byteArraysEqual(entry.idHash, idHash)
+        )
+      ) {
+        continue;
+      }
+      candidates.push({ platformSeed, idHash });
+    }
+  }
+
   return candidates;
 }
 
@@ -484,10 +723,18 @@ function buildIdentityValueCandidates(raw: string): string[] {
     return [];
   }
   const candidates = [value];
+  const lowercase = value.toLowerCase();
+  if (!candidates.includes(lowercase)) {
+    candidates.push(lowercase);
+  }
   if (value.startsWith("@") && value.length > 1) {
     const withoutAt = value.slice(1);
     if (!candidates.includes(withoutAt)) {
       candidates.push(withoutAt);
+    }
+    const withoutAtLowercase = withoutAt.toLowerCase();
+    if (!candidates.includes(withoutAtLowercase)) {
+      candidates.push(withoutAtLowercase);
     }
   }
   return candidates;
@@ -519,6 +766,17 @@ async function sendInstructionWithWallet(args: {
     "confirmed"
   );
   return signature;
+}
+
+async function simulateInstructionWithFeePayer(args: {
+  connection: Connection;
+  feePayer: PublicKey;
+  instruction: TransactionInstruction;
+}) {
+  const { connection, feePayer, instruction } = args;
+  const transaction = new Transaction().add(instruction);
+  transaction.feePayer = feePayer;
+  return connection.simulateTransaction(transaction);
 }
 
 async function resolveSdkClient(
@@ -697,6 +955,282 @@ async function validateProgramOwnedAccount({
   return null;
 }
 
+async function validateCheckGateInputs(args: {
+  connection: Connection;
+  criteriaVariant: { type: string; config: Record<string, unknown> };
+  user: PublicKey;
+  reputationAccount?: PublicKey;
+  identityAccount?: PublicKey;
+  linkAccount?: PublicKey;
+  tokenAccount?: PublicKey;
+}) {
+  const {
+    connection,
+    criteriaVariant,
+    user,
+    reputationAccount,
+    identityAccount,
+    linkAccount,
+    tokenAccount
+  } = args;
+  const issues: string[] = [];
+  const { type, config } = criteriaVariant;
+
+  const requiresReputation =
+    type === "minReputation" || type === "timeLockedReputation" || type === "combined";
+  if (requiresReputation) {
+    if (!reputationAccount) {
+      issues.push("Reputation account is required for this gate.");
+    } else {
+      const repInfo = await connection.getAccountInfo(reputationAccount);
+      if (!repInfo) {
+        issues.push("Reputation account was not found on the selected network.");
+      } else if (!repInfo.owner.equals(VINE_REPUTATION_PROGRAM_ID)) {
+        issues.push(
+          `Reputation account has owner ${repInfo.owner.toBase58()} but expected ${VINE_REPUTATION_PROGRAM_ID.toBase58()}.`
+        );
+      } else {
+        try {
+          const decoded = await decodeVineReputationFlexible(repInfo.data);
+          const expectedSeason = asNumberValue(config.season);
+          const vineConfig = asPublicKeyValue(config.vineConfig);
+          if (!decoded.user.equals(user)) {
+            issues.push(`Reputation account user ${decoded.user.toBase58()} does not match connected wallet.`);
+          }
+          if (expectedSeason !== undefined && decoded.season !== expectedSeason) {
+            issues.push(
+              `Reputation account season ${decoded.season} does not match gate season ${expectedSeason}.`
+            );
+          }
+          if (vineConfig && expectedSeason !== undefined) {
+            const [expectedReputationPda] = VineReputationClient.getReputationPda(
+              vineConfig,
+              user,
+              expectedSeason,
+              VINE_REPUTATION_PROGRAM_ID
+            );
+            if (!expectedReputationPda.equals(reputationAccount)) {
+              issues.push(
+                `Reputation account does not match expected PDA ${expectedReputationPda.toBase58()} for this gate.`
+              );
+            }
+          }
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : "decode failed";
+          issues.push(`Reputation account is not a valid Vine Reputation account (${detail}).`);
+        }
+      }
+    }
+  }
+
+  const requiresIdentity = type === "verifiedIdentity" || type === "verifiedWithWallet" || type === "combined";
+  const requiresLink =
+    type === "verifiedWithWallet" || (type === "combined" && Boolean(config.requireWalletLink));
+
+  const grapeSpaceInput = asPublicKeyValue(config.grapeSpace);
+  const allowedPlatforms = normalizePlatforms(config.platforms);
+  const resolvedVerificationSpace =
+    requiresIdentity && grapeSpaceInput
+      ? await resolveVerificationSpaceContext(connection, grapeSpaceInput)
+      : null;
+  const grapeSpace = resolvedVerificationSpace?.space ?? grapeSpaceInput;
+
+  if (requiresIdentity) {
+    if (!identityAccount) {
+      issues.push("Identity account is required for this gate.");
+    } else {
+      const identityInfo = await connection.getAccountInfo(identityAccount);
+      if (!identityInfo) {
+        issues.push("Identity account was not found on the selected network.");
+      } else if (!identityInfo.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
+        issues.push(
+          `Identity account has owner ${identityInfo.owner.toBase58()} but expected ${GRAPE_VERIFICATION_PROGRAM_ID.toBase58()}.`
+        );
+      } else if (grapeSpace) {
+        const identityIssue = getIdentityGateEligibilityIssue({
+          identityData: identityInfo.data,
+          grapeSpace,
+          allowedPlatforms,
+          nowUnix: Math.floor(Date.now() / 1000)
+        });
+        if (identityIssue) {
+          issues.push(identityIssue);
+        }
+      }
+    }
+  }
+
+  if (linkAccount) {
+    const linkInfo = await connection.getAccountInfo(linkAccount);
+    if (!linkInfo) {
+      issues.push("Link account was not found on the selected network.");
+    } else if (!linkInfo.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
+      issues.push(
+        `Link account has owner ${linkInfo.owner.toBase58()} but expected ${GRAPE_VERIFICATION_PROGRAM_ID.toBase58()}.`
+      );
+    } else {
+      let parsedLink: ReturnType<typeof GrapeVerificationRegistry.parseLink> | null = null;
+      try {
+        parsedLink = GrapeVerificationRegistry.parseLink(linkInfo.data);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "parse failed";
+        issues.push(`Link account is not a valid verification link account (${detail}).`);
+      }
+      if (parsedLink) {
+        if (identityAccount && !parsedLink.identity.equals(identityAccount)) {
+          issues.push("Link account points to a different identity account.");
+        }
+        const walletSaltCandidates = resolvedVerificationSpace?.saltCandidates ?? [];
+        if (walletSaltCandidates.length > 0) {
+          const walletHashes = walletSaltCandidates.map((salt) =>
+            GrapeVerificationRegistry.walletHash(salt, user)
+          );
+          if (!walletHashes.some((hash) => byteArraysEqual(hash, parsedLink.walletHash))) {
+            const actualLinkHash = Buffer.from(parsedLink.walletHash).toString("hex").slice(0, 24);
+            issues.push(
+              `Link account wallet hash (${actualLinkHash}) does not match this wallet for the gate's salts.`
+            );
+          }
+        }
+      }
+    }
+  } else if (requiresLink) {
+    issues.push("Link account is required for this gate.");
+  }
+
+  if (type === "tokenHolding" && !tokenAccount) {
+    issues.push("Token account is required for token-holding gates.");
+  }
+
+  return issues;
+}
+
+interface CheckGateInputParams {
+  gateId: PublicKey;
+  user: PublicKey;
+  reputationAccount?: PublicKey;
+  identityAccount?: PublicKey;
+  linkAccount?: PublicKey;
+  tokenAccount?: PublicKey;
+  storeRecord: boolean;
+}
+
+async function runCheckGateBorshDiagnostics(args: {
+  connection: Connection;
+  client: Record<string, unknown>;
+  params: CheckGateInputParams;
+}) {
+  const { connection, client, params } = args;
+  const diagnostics: string[] = [];
+
+  const buildInstruction = client.buildCheckGateInstruction as
+    | ((input: CheckGateInputParams) => Promise<TransactionInstruction>)
+    | undefined;
+  if (typeof buildInstruction !== "function") {
+    return diagnostics;
+  }
+
+  const variants: Array<{
+    label: string;
+    mutate: Partial<CheckGateInputParams>;
+  }> = [
+    { label: "full", mutate: {} },
+    { label: "without reputation", mutate: { reputationAccount: undefined } },
+    { label: "without identity", mutate: { identityAccount: undefined } },
+    { label: "without link", mutate: { linkAccount: undefined } }
+  ];
+
+  const variantResults: Array<{ label: string; borsh: boolean; summary: string }> = [];
+  for (const variant of variants) {
+    try {
+      const input = { ...params, ...variant.mutate };
+      const instruction = await buildInstruction.call(client, input);
+      const simulation = await simulateInstructionWithFeePayer({
+        connection,
+        feePayer: params.user,
+        instruction
+      });
+      const logs = simulation.value.logs ?? [];
+      const borsh = logs.some((line) => line.includes("BorshIoError"));
+      const summary = simulation.value.err
+        ? `err=${JSON.stringify(simulation.value.err)}`
+        : "ok";
+      variantResults.push({ label: variant.label, borsh, summary });
+    } catch (error) {
+      const summary = error instanceof Error ? error.message : "simulation failed";
+      variantResults.push({ label: variant.label, borsh: false, summary });
+    }
+  }
+
+  const full = variantResults.find((entry) => entry.label === "full");
+  if (full?.borsh) {
+    const withoutReputation = variantResults.find((entry) => entry.label === "without reputation");
+    const withoutIdentity = variantResults.find((entry) => entry.label === "without identity");
+    const withoutLink = variantResults.find((entry) => entry.label === "without link");
+
+    if (withoutReputation && !withoutReputation.borsh) {
+      diagnostics.push("Borsh failure disappears when reputation account is removed.");
+    }
+    if (withoutIdentity && !withoutIdentity.borsh) {
+      diagnostics.push("Borsh failure disappears when identity account is removed.");
+    }
+    if (withoutLink && !withoutLink.borsh) {
+      diagnostics.push("Borsh failure disappears when link account is removed.");
+    }
+  }
+
+  const accountChecks: Array<{
+    label: string;
+    account?: PublicKey;
+    expectedOwner: PublicKey;
+  }> = [
+    { label: "Reputation", account: params.reputationAccount, expectedOwner: VINE_REPUTATION_PROGRAM_ID },
+    { label: "Identity", account: params.identityAccount, expectedOwner: GRAPE_VERIFICATION_PROGRAM_ID },
+    { label: "Link", account: params.linkAccount, expectedOwner: GRAPE_VERIFICATION_PROGRAM_ID }
+  ];
+
+  for (const check of accountChecks) {
+    if (!check.account) {
+      continue;
+    }
+    const info = await connection.getAccountInfo(check.account);
+    if (!info) {
+      diagnostics.push(`${check.label} account is missing on selected network.`);
+      continue;
+    }
+    diagnostics.push(
+      `${check.label} account owner=${info.owner.toBase58()} dataLen=${info.data.length}`
+    );
+    if (!info.owner.equals(check.expectedOwner)) {
+      diagnostics.push(
+        `${check.label} owner mismatch (expected ${check.expectedOwner.toBase58()}).`
+      );
+    }
+  }
+
+  const reputationInfo =
+    params.reputationAccount ? await connection.getAccountInfo(params.reputationAccount) : null;
+  if (reputationInfo && reputationInfo.owner.equals(VINE_REPUTATION_PROGRAM_ID)) {
+    try {
+      const decoded = await decodeVineReputationFlexible(reputationInfo.data);
+      diagnostics.push(
+        `Reputation decode ok (layout=${decoded.layout}, season=${decoded.season}, user=${decoded.user.toBase58()})`
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "decode failed";
+      diagnostics.push(`Reputation decode failed: ${detail}`);
+    }
+  }
+
+  if (variantResults.length > 0) {
+    diagnostics.push(
+      `Variant simulation: ${variantResults.map((entry) => `${entry.label}(${entry.borsh ? "borsh" : entry.summary})`).join(", ")}`
+    );
+  }
+
+  return diagnostics;
+}
+
 async function formatCheckGateError(error: unknown, connection: Connection | null) {
   if (error instanceof SendTransactionError) {
     let logs = error.logs ?? [];
@@ -771,7 +1305,7 @@ async function resolveVerificationSpaceContext(connection: Connection, grapeSpac
       if (!space || !space.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
         return null;
       }
-      const saltCandidates = extractVerificationSaltCandidates(space.data);
+      const saltCandidates = extractVerificationSaltCandidatesForResolvedSpace(space.data, candidate);
       if (saltCandidates.length === 0) {
         return null;
       }
@@ -804,13 +1338,24 @@ async function resolveVerificationSpaceContext(connection: Connection, grapeSpac
 async function findWalletLinkedIdentity({
   connection,
   grapeSpace,
-  walletHashes
+  walletHashes,
+  allowedPlatforms,
+  nowUnix
 }: {
   connection: Connection;
   grapeSpace: PublicKey;
   walletHashes: Uint8Array[];
+  allowedPlatforms: number[];
+  nowUnix: number;
 }): Promise<{ identity: PublicKey; link: PublicKey } | null> {
   try {
+    const candidates: Array<{
+      identity: PublicKey;
+      link: PublicKey;
+      platform: number;
+      linkedAt: number;
+    }> = [];
+    const seenCandidates = new Set<string>();
     for (const walletHash of uniqueByteArrays(walletHashes)) {
       const links = await connection.getProgramAccounts(GRAPE_VERIFICATION_PROGRAM_ID, {
         filters: [{ memcmp: { offset: 41, bytes: bs58.encode(Buffer.from(walletHash)) } }]
@@ -828,11 +1373,49 @@ async function findWalletLinkedIdentity({
         if (!identityInfo || !identityInfo.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
           continue;
         }
-        if (!identityBelongsToSpace(identityInfo.data, grapeSpace)) {
+        const identityIssue = getIdentityGateEligibilityIssue({
+          identityData: identityInfo.data,
+          grapeSpace,
+          allowedPlatforms,
+          nowUnix
+        });
+        if (identityIssue) {
           continue;
         }
-        return { identity: parsed.identity, link: entry.pubkey };
+        const identityParsed = parseVerificationIdentityData(identityInfo.data);
+        if (!identityParsed) {
+          continue;
+        }
+        const key = `${parsed.identity.toBase58()}:${entry.pubkey.toBase58()}`;
+        if (seenCandidates.has(key)) {
+          continue;
+        }
+        seenCandidates.add(key);
+        candidates.push({
+          identity: parsed.identity,
+          link: entry.pubkey,
+          platform: identityParsed.platform,
+          linkedAt: parsed.linkedAt
+        });
       }
+    }
+    if (candidates.length > 0) {
+      const platformOrder = new Map<number, number>();
+      for (const [index, platform] of allowedPlatforms.entries()) {
+        if (!platformOrder.has(platform)) {
+          platformOrder.set(platform, index);
+        }
+      }
+      candidates.sort((left, right) => {
+        const leftOrder = platformOrder.get(left.platform) ?? Number.MAX_SAFE_INTEGER;
+        const rightOrder = platformOrder.get(right.platform) ?? Number.MAX_SAFE_INTEGER;
+        if (leftOrder !== rightOrder) {
+          return leftOrder - rightOrder;
+        }
+        return right.linkedAt - left.linkedAt;
+      });
+      const best = candidates[0];
+      return { identity: best.identity, link: best.link };
     }
   } catch {
     // Ignore lookup errors and fall back to other derivation paths.
@@ -1460,10 +2043,17 @@ export default function AccessPage() {
             season,
             VINE_REPUTATION_PROGRAM_ID
           );
-          const nextReputation = reputationPda.toBase58();
-          updates.reputationAccount = nextReputation;
-          if (nextReputation !== memberForm.reputationAccount.trim()) {
-            derivedCount += 1;
+          const reputationInfo = await connection.getAccountInfo(reputationPda);
+          if (reputationInfo && reputationInfo.owner.equals(VINE_REPUTATION_PROGRAM_ID)) {
+            const nextReputation = reputationPda.toBase58();
+            updates.reputationAccount = nextReputation;
+            if (nextReputation !== memberForm.reputationAccount.trim()) {
+              derivedCount += 1;
+            }
+          } else {
+            addBlocker(
+              "Could not find a valid reputation account for this wallet on the configured season/vineConfig."
+            );
           }
         } else {
           notes.push("Could not derive reputation account from gate criteria.");
@@ -1482,6 +2072,26 @@ export default function AccessPage() {
         const grapeSpace = resolvedVerificationSpace?.space ?? grapeSpaceInput;
         const verificationSaltCandidates = resolvedVerificationSpace?.saltCandidates ?? [];
         const platforms = normalizePlatforms(criteriaVariant.config.platforms);
+        const nowUnix = Math.floor(Date.now() / 1000);
+
+        if (selectedIdentity && grapeSpace) {
+          const selectedIdentityInfo = await connection.getAccountInfo(selectedIdentity);
+          const selectedIdentityIssue =
+            !selectedIdentityInfo || !selectedIdentityInfo.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)
+              ? "Identity account is missing or has invalid owner."
+              : getIdentityGateEligibilityIssue({
+                  identityData: selectedIdentityInfo.data,
+                  grapeSpace,
+                  allowedPlatforms: platforms,
+                  nowUnix
+                });
+          if (selectedIdentityIssue) {
+            selectedIdentity = undefined;
+            selectedLink = undefined;
+            notes.push("Existing identity account does not satisfy gate criteria; attempting re-derive.");
+          }
+        }
+
         if (!selectedIdentity && !selectedLink && grapeSpace && verificationSaltCandidates.length > 0) {
           const walletHashes = uniqueByteArrays(
             verificationSaltCandidates.map((salt) =>
@@ -1491,7 +2101,9 @@ export default function AccessPage() {
           const linked = await findWalletLinkedIdentity({
             connection,
             grapeSpace,
-            walletHashes
+            walletHashes,
+            allowedPlatforms: platforms,
+            nowUnix
           });
           if (linked) {
             selectedIdentity = linked.identity;
@@ -1526,7 +2138,16 @@ export default function AccessPage() {
                     );
                     fallbackIdentity = fallbackIdentity ?? identityPda;
                     const exists = await connection.getAccountInfo(identityPda);
-                    if (exists) {
+                    if (
+                      exists &&
+                      exists.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID) &&
+                      !getIdentityGateEligibilityIssue({
+                        identityData: exists.data,
+                        grapeSpace,
+                        allowedPlatforms: platforms,
+                        nowUnix
+                      })
+                    ) {
                       selectedIdentity = identityPda;
                       break;
                     }
@@ -1553,7 +2174,16 @@ export default function AccessPage() {
                   );
                   fallbackIdentity = fallbackIdentity ?? identityPda;
                   const exists = await connection.getAccountInfo(identityPda);
-                  if (exists) {
+                  if (
+                    exists &&
+                    exists.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID) &&
+                    !getIdentityGateEligibilityIssue({
+                      identityData: exists.data,
+                      grapeSpace,
+                      allowedPlatforms: platforms,
+                      nowUnix
+                    })
+                  ) {
                     selectedIdentity = identityPda;
                     break;
                   }
@@ -1588,6 +2218,34 @@ export default function AccessPage() {
           (criteriaVariant.type === "combined" && Boolean(criteriaVariant.config.requireWalletLink));
 
         if (requiresLink) {
+          if (selectedLink) {
+            const selectedLinkInfo = await connection.getAccountInfo(selectedLink);
+            let selectedLinkValid = Boolean(
+              selectedLinkInfo && selectedLinkInfo.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)
+            );
+            if (selectedLinkValid && selectedLinkInfo) {
+              try {
+                const parsedSelectedLink = GrapeVerificationRegistry.parseLink(selectedLinkInfo.data);
+                if (!selectedIdentity || !parsedSelectedLink.identity.equals(selectedIdentity)) {
+                  selectedLinkValid = false;
+                } else if (verificationSaltCandidates.length > 0) {
+                  const candidateHashes = verificationSaltCandidates.map((salt) =>
+                    GrapeVerificationRegistry.walletHash(salt, wallet.publicKey!)
+                  );
+                  if (!candidateHashes.some((hash) => byteArraysEqual(hash, parsedSelectedLink.walletHash))) {
+                    selectedLinkValid = false;
+                  }
+                }
+              } catch {
+                selectedLinkValid = false;
+              }
+            }
+            if (!selectedLinkValid) {
+              selectedLink = undefined;
+              notes.push("Existing link account does not match selected identity/wallet; attempting re-derive.");
+            }
+          }
+
           if (selectedLink) {
             const nextLink = selectedLink.toBase58();
             updates.linkAccount = nextLink;
@@ -1783,6 +2441,8 @@ export default function AccessPage() {
     }
 
     setMemberBusy(true);
+    let latestCheckParams: CheckGateInputParams | null = null;
+    let latestClient: Record<string, unknown> | null = null;
     try {
       const derivedForm = await handleAutoDeriveMemberAccounts({ silent: true });
       if (!derivedForm) {
@@ -1801,8 +2461,27 @@ export default function AccessPage() {
         tokenAccount: parsePublicKey("Token account", effectiveForm.tokenAccount, false),
         storeRecord: effectiveForm.storeRecord
       };
+      latestCheckParams = params;
+
+      const loadedGate = await loadGateContext(effectiveForm.gateId, { silent: true });
+      if (!loadedGate) {
+        throw new Error("Unable to load gate criteria before checking access.");
+      }
+      const validationIssues = await validateCheckGateInputs({
+        connection,
+        criteriaVariant: loadedGate.criteriaVariant,
+        user: params.user,
+        reputationAccount: params.reputationAccount,
+        identityAccount: params.identityAccount,
+        linkAccount: params.linkAccount,
+        tokenAccount: params.tokenAccount
+      });
+      if (validationIssues.length > 0) {
+        throw new Error(`Check input validation failed. ${validationIssues.join(" ")}`);
+      }
 
       const client = await getClient();
+      latestClient = client;
       const method = client.checkGate as ((arg: unknown) => unknown) | undefined;
       if (typeof method !== "function") {
         throw new Error("SDK client is missing checkGate.");
@@ -1833,7 +2512,41 @@ export default function AccessPage() {
         passed === false ? "info" : "success"
       );
     } catch (error) {
-      const message = await formatCheckGateError(error, connection);
+      let message = await formatCheckGateError(error, connection);
+
+      let borshDetected = false;
+      if (error instanceof SendTransactionError) {
+        let logs = error.logs ?? [];
+        if (logs.length === 0 && connection) {
+          try {
+            logs = (await error.getLogs(connection)) ?? [];
+          } catch {
+            // Ignore log fetch failures.
+          }
+        }
+        borshDetected = logs.some(
+          (line) => line.includes("BorshIoError") || line.includes("Not all bytes read")
+        );
+      } else if (error instanceof Error) {
+        borshDetected =
+          error.message.includes("BorshIoError") || error.message.includes("Not all bytes read");
+      }
+
+      if (borshDetected && connection && latestCheckParams && latestClient) {
+        try {
+          const diagnostics = await runCheckGateBorshDiagnostics({
+            connection,
+            client: latestClient,
+            params: latestCheckParams
+          });
+          if (diagnostics.length > 0) {
+            message = `${message} Diagnostics: ${diagnostics.join(" ")}`;
+          }
+        } catch {
+          // Ignore diagnostic failures and keep original error.
+        }
+      }
+
       setMemberCheck({ status: "error", message });
       notify(message, "error");
     } finally {
@@ -1994,54 +2707,131 @@ export default function AccessPage() {
         );
       }
 
+      const sharedWalletSaltCandidates = uniqueByteArrays(
+        resolvedVerificationSpace.saltCandidates.length > 0
+          ? resolvedVerificationSpace.saltCandidates
+          : linkContexts.map((context) => context.salt)
+      );
+
       let lastError: Error | null = null;
       for (const attempt of attempts) {
-        const walletHash = GrapeVerificationRegistry.walletHash(attempt.salt, wallet.publicKey);
-        const built = GrapeVerificationRegistry.buildLinkWalletSelfIx({
-          daoId: attempt.daoId,
-          platformSeed: attempt.platformSeed,
-          idHash: attempt.idHash,
-          wallet: wallet.publicKey,
-          walletHash,
-          payer: wallet.publicKey,
-          programId: GRAPE_VERIFICATION_PROGRAM_ID
-        });
-        if (!built.spaceAcct.equals(grapeSpace) || !built.identity.equals(attempt.identity)) {
-          continue;
-        }
+        const attemptWalletSaltCandidates = uniqueByteArrays([
+          attempt.salt,
+          ...sharedWalletSaltCandidates
+        ]);
+        const seenLinkAccounts = new Set<string>();
 
-        const existingLink = await connection.getAccountInfo(built.link);
-        if (existingLink && existingLink.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
-          setMemberForm((prev) => ({
-            ...prev,
-            identityAccount: built.identity.toBase58(),
-            linkAccount: built.link.toBase58()
-          }));
-          const message = "Wallet link already exists for this identity.";
-          setMemberDerive({ status: "success", message });
-          notify(message, "success");
-          await handleAutoDeriveMemberAccounts({ silent: true });
-          return;
-        }
+        for (const walletSalt of attemptWalletSaltCandidates) {
+          const walletHash = GrapeVerificationRegistry.walletHash(walletSalt, wallet.publicKey);
+          const built = GrapeVerificationRegistry.buildLinkWalletSelfIx({
+            daoId: attempt.daoId,
+            platformSeed: attempt.platformSeed,
+            idHash: attempt.idHash,
+            wallet: wallet.publicKey,
+            walletHash,
+            payer: wallet.publicKey,
+            programId: GRAPE_VERIFICATION_PROGRAM_ID
+          });
+          if (!built.spaceAcct.equals(grapeSpace) || !built.identity.equals(attempt.identity)) {
+            continue;
+          }
+          if (seenLinkAccounts.has(built.link.toBase58())) {
+            continue;
+          }
+          seenLinkAccounts.add(built.link.toBase58());
 
-        try {
-          const signature = await sendInstructionWithWallet({
+          const existingLink = await connection.getAccountInfo(built.link);
+          if (existingLink && existingLink.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
+            setMemberForm((prev) => ({
+              ...prev,
+              identityAccount: built.identity.toBase58(),
+              linkAccount: built.link.toBase58()
+            }));
+            const message = "Wallet link already exists for this identity.";
+            setMemberDerive({ status: "success", message });
+            notify(message, "success");
+            await handleAutoDeriveMemberAccounts({ silent: true });
+            return;
+          }
+
+          const simulation = await simulateInstructionWithFeePayer({
             connection,
-            wallet: wallet as unknown as WalletProvider,
+            feePayer: wallet.publicKey,
             instruction: built.ix
           });
-          setMemberForm((prev) => ({
-            ...prev,
-            identityAccount: built.identity.toBase58(),
-            linkAccount: built.link.toBase58()
-          }));
-          await handleAutoDeriveMemberAccounts({ silent: true });
-          const message = `Wallet linked successfully. Signature: ${signature}`;
-          setMemberDerive({ status: "success", message });
-          notify(message, "success");
-          return;
-        } catch (error) {
-          lastError = error instanceof Error ? error : new Error("Failed to submit link wallet transaction.");
+          const simulationLogs = simulation.value.logs ?? [];
+          const hasWalletHashMismatch = simulationLogs.some((line) =>
+            line.includes("WalletHashMismatch")
+          );
+          if (hasWalletHashMismatch) {
+            continue;
+          }
+          if (simulation.value.err) {
+            lastError = new Error(
+              [
+                "Link attempt simulation failed.",
+                `daoId=${attempt.daoId.toBase58()}`,
+                `platform=${attempt.platformSeed}:${PLATFORM_TAGS[attempt.platformSeed] ?? "unknown"}`,
+                `identity=${attempt.identity.toBase58()}`,
+                `link=${built.link.toBase58()}`,
+                `walletSaltHex=${shortHex(walletSalt, 24)}`,
+                `walletHashHex=${shortHex(walletHash, 24)}`,
+                `simulationErr=${JSON.stringify(simulation.value.err)}`,
+                simulationLogs.length > 0
+                  ? `logs=${simulationLogs.slice(-8).join(" | ")}`
+                  : ""
+              ]
+                .filter(Boolean)
+                .join(" ")
+            );
+            continue;
+          }
+
+          try {
+            const signature = await sendInstructionWithWallet({
+              connection,
+              wallet: wallet as unknown as WalletProvider,
+              instruction: built.ix
+            });
+            setMemberForm((prev) => ({
+              ...prev,
+              identityAccount: built.identity.toBase58(),
+              linkAccount: built.link.toBase58()
+            }));
+            await handleAutoDeriveMemberAccounts({ silent: true });
+            const message = `Wallet linked successfully. Signature: ${signature}`;
+            setMemberDerive({ status: "success", message });
+            notify(message, "success");
+            return;
+          } catch (error) {
+            let errorMessage =
+              error instanceof Error ? error.message : "Failed to submit link wallet transaction.";
+            if (error instanceof SendTransactionError) {
+              let logs = error.logs ?? [];
+              if (logs.length === 0) {
+                try {
+                  logs = (await error.getLogs(connection)) ?? [];
+                } catch {
+                  // Ignore log fetch failures and keep original error text.
+                }
+              }
+              if (logs.length > 0) {
+                errorMessage = `${errorMessage} Logs: ${logs.slice(-8).join(" | ")}`;
+              }
+            }
+            lastError = new Error(
+              [
+                "Link attempt failed.",
+                `daoId=${attempt.daoId.toBase58()}`,
+                `platform=${attempt.platformSeed}:${PLATFORM_TAGS[attempt.platformSeed] ?? "unknown"}`,
+                `identity=${attempt.identity.toBase58()}`,
+                `link=${built.link.toBase58()}`,
+                `walletSaltHex=${shortHex(walletSalt, 24)}`,
+                `walletHashHex=${shortHex(walletHash, 24)}`,
+                errorMessage
+              ].join(" ")
+            );
+          }
         }
       }
 
@@ -2198,14 +2988,18 @@ export default function AccessPage() {
 
       lines.push("Wallet-hash link scan:");
       let totalLinkMatches = 0;
-      for (const [index, context] of linkContexts.entries()) {
-        const walletHash = GrapeVerificationRegistry.walletHash(context.salt, wallet.publicKey);
+      const walletSaltCandidates = uniqueByteArrays([
+        ...resolvedVerificationSpace.saltCandidates,
+        ...linkContexts.map((context) => context.salt)
+      ]);
+      for (const [index, walletSalt] of walletSaltCandidates.entries()) {
+        const walletHash = GrapeVerificationRegistry.walletHash(walletSalt, wallet.publicKey);
         const links = await connection.getProgramAccounts(GRAPE_VERIFICATION_PROGRAM_ID, {
           filters: [{ memcmp: { offset: 41, bytes: bs58.encode(Buffer.from(walletHash)) } }]
         });
         totalLinkMatches += links.length;
         lines.push(
-          `  - context#${index + 1} walletHashHex=${shortHex(walletHash, 24)} linkMatches=${links.length}`
+          `  - salt#${index + 1} saltHex=${shortHex(walletSalt, 24)} walletHashHex=${shortHex(walletHash, 24)} linkMatches=${links.length}`
         );
         for (const link of links.slice(0, 5)) {
           let parsed: ReturnType<typeof GrapeVerificationRegistry.parseLink> | null = null;
