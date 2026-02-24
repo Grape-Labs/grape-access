@@ -47,8 +47,18 @@ import { Buffer } from "buffer";
 import { AnchorProvider } from "@coral-xyz/anchor";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useWallet } from "@solana/wallet-adapter-react";
-import { Connection, Keypair, PublicKey, Transaction, clusterApiUrl } from "@solana/web3.js";
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  SendTransactionError,
+  Transaction,
+  clusterApiUrl
+} from "@solana/web3.js";
+import bs58 from "bs58";
 import * as GPassSdk from "@grapenpm/grape-access-sdk";
+import * as GrapeVerificationRegistry from "@grapenpm/grape-verification-registry";
+import * as VineReputationClient from "@grapenpm/vine-reputation-client";
 
 type CriteriaKind =
   | "minReputation"
@@ -203,7 +213,6 @@ const {
   GateCriteriaFactory,
   GateTypeFactory,
   findGatePda,
-  findVineReputationPda,
   findGrapeIdentityPda,
   findGrapeLinkPda
 } = GPassSdk;
@@ -242,6 +251,12 @@ const platformOptions = [
   { label: "Twitter", value: VerificationPlatform.Twitter as number },
   { label: "Email", value: VerificationPlatform.Email as number }
 ];
+const PLATFORM_TAGS: Record<number, string> = {
+  0: "discord",
+  1: "telegram",
+  2: "twitter",
+  3: "email"
+};
 
 const defaultCreateForm: CreateFormState = {
   gateId: "",
@@ -485,6 +500,140 @@ function asNumberValue(value: unknown): number | undefined {
   return undefined;
 }
 
+async function validateProgramOwnedAccount({
+  connection,
+  label,
+  account,
+  expectedOwner,
+  required = false
+}: {
+  connection: Connection;
+  label: string;
+  account?: PublicKey;
+  expectedOwner: PublicKey;
+  required?: boolean;
+}) {
+  if (!account) {
+    return required ? `${label} is required.` : null;
+  }
+  const accountInfo = await connection.getAccountInfo(account);
+  if (!accountInfo) {
+    return `${label} was not found on the selected network.`;
+  }
+  if (!accountInfo.owner.equals(expectedOwner)) {
+    return `${label} has unexpected owner ${accountInfo.owner.toBase58()}. Expected ${expectedOwner.toBase58()}.`;
+  }
+  return null;
+}
+
+async function formatCheckGateError(error: unknown, connection: Connection | null) {
+  if (error instanceof SendTransactionError) {
+    let logs = error.logs ?? [];
+    if (logs.length === 0 && connection) {
+      try {
+        logs = (await error.getLogs(connection)) ?? [];
+      } catch {
+        // Ignore log fetch failures.
+      }
+    }
+    const borshLog = logs.find((line) => line.includes("BorshIoError"));
+    if (borshLog) {
+      return `${error.message} Likely cause: one of Reputation/Identity/Link accounts has the wrong account type for this gate.`;
+    }
+  }
+  return error instanceof Error ? error.message : "Failed to check gate.";
+}
+
+async function resolveVerificationSpaceContext(connection: Connection, grapeSpace: PublicKey) {
+  const tryReadSpace = async (candidate: PublicKey) => {
+    try {
+      const space = await GrapeVerificationRegistry.fetchSpace(connection, candidate);
+      if (!space || !space.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
+        return null;
+      }
+      const saltCandidates: Uint8Array[] = [];
+      if (space.data.length >= 105) {
+        saltCandidates.push(Uint8Array.from(space.data.subarray(73, 105)));
+      }
+      if (space.data.length >= 73) {
+        saltCandidates.push(Uint8Array.from(space.data.subarray(41, 73)));
+      }
+      const uniqueSaltCandidates: Uint8Array[] = [];
+      for (const salt of saltCandidates) {
+        if (!uniqueSaltCandidates.some((entry) => Buffer.from(entry).equals(Buffer.from(salt)))) {
+          uniqueSaltCandidates.push(salt);
+        }
+      }
+      if (uniqueSaltCandidates.length === 0) {
+        return null;
+      }
+      return { space: candidate, saltCandidates: uniqueSaltCandidates };
+    } catch {
+      return null;
+    }
+  };
+
+  const direct = await tryReadSpace(grapeSpace);
+  if (direct) {
+    return direct;
+  }
+
+  try {
+    const [derivedSpace] = GrapeVerificationRegistry.deriveSpacePda(grapeSpace);
+    if (!derivedSpace.equals(grapeSpace)) {
+      return await tryReadSpace(derivedSpace);
+    }
+  } catch {
+    // Ignore and return null.
+  }
+  return null;
+}
+
+async function findWalletLinkedIdentity({
+  connection,
+  grapeSpace,
+  walletHashes
+}: {
+  connection: Connection;
+  grapeSpace: PublicKey;
+  walletHashes: Uint8Array[];
+}): Promise<{ identity: PublicKey; link: PublicKey } | null> {
+  try {
+    for (const walletHash of walletHashes) {
+      const links = await connection.getProgramAccounts(GRAPE_VERIFICATION_PROGRAM_ID, {
+        filters: [{ memcmp: { offset: 41, bytes: bs58.encode(Buffer.from(walletHash)) } }]
+      });
+      for (const entry of links) {
+        let parsed: ReturnType<typeof GrapeVerificationRegistry.parseLink>;
+        try {
+          parsed = GrapeVerificationRegistry.parseLink(entry.account.data);
+        } catch {
+          continue;
+        }
+
+        const identityInfo = await connection.getAccountInfo(parsed.identity);
+        if (!identityInfo || !identityInfo.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
+          continue;
+        }
+        const identityData = identityInfo.data;
+        const hasOldLayoutSpaceMatch =
+          identityData.length >= 41 &&
+          Buffer.from(identityData.subarray(9, 41)).equals(Buffer.from(grapeSpace.toBytes()));
+        const hasNewLayoutSpaceMatch =
+          identityData.length >= 73 &&
+          Buffer.from(identityData.subarray(41, 73)).equals(Buffer.from(grapeSpace.toBytes()));
+        if (!hasOldLayoutSpaceMatch && !hasNewLayoutSpaceMatch) {
+          continue;
+        }
+        return { identity: parsed.identity, link: entry.pubkey };
+      }
+    }
+  } catch {
+    // Ignore lookup errors and fall back to other derivation paths.
+  }
+  return null;
+}
+
 async function sha256Bytes(bytes: Uint8Array): Promise<Uint8Array> {
   if (!globalThis.crypto?.subtle) {
     throw new Error("Web Crypto API unavailable in this browser.");
@@ -496,6 +645,16 @@ async function sha256Bytes(bytes: Uint8Array): Promise<Uint8Array> {
 
 async function sha256Text(text: string): Promise<Uint8Array> {
   return sha256Bytes(new TextEncoder().encode(text));
+}
+
+function uniqueByteArrays(values: Uint8Array[]): Uint8Array[] {
+  const out: Uint8Array[] = [];
+  for (const value of values) {
+    if (!out.some((entry) => Buffer.from(entry).equals(Buffer.from(value)))) {
+      out.push(value);
+    }
+  }
+  return out;
 }
 
 async function resolveSdkClient(
@@ -1075,15 +1234,48 @@ export default function Page() {
     try {
       const gateId = parsePublicKey("Gate ID", gateIdRaw, true)!;
       const client = await getMemberClient();
+      const [gatePda] = await findGatePda(gateId, GPASS_PROGRAM_ID);
       const fetchGateMethod = client.fetchGate as ((input: PublicKey) => Promise<unknown>) | undefined;
-
-      if (typeof fetchGateMethod !== "function") {
-        throw new Error("SDK client is missing fetchGate.");
+      let gate: unknown = null;
+      let sdkFetchError: Error | undefined;
+      if (typeof fetchGateMethod === "function") {
+        try {
+          gate = await fetchGateMethod.call(client, gateId);
+        } catch (error) {
+          sdkFetchError = error instanceof Error ? error : new Error("Unknown SDK fetchGate error.");
+        }
       }
-
-      const gate = await fetchGateMethod.call(client, gateId);
+      if (!gate) {
+        const clientAny = client as Record<string, unknown>;
+        const gateAccountClient =
+          (clientAny.program as Record<string, unknown> | undefined)?.account &&
+          (((clientAny.program as Record<string, unknown>).account as Record<string, unknown>).Gate ??
+            ((clientAny.program as Record<string, unknown>).account as Record<string, unknown>).gate);
+        const fetchNullable =
+          (gateAccountClient as Record<string, unknown> | undefined)?.fetchNullable as
+            | ((address: PublicKey) => Promise<unknown>)
+            | undefined;
+        const fetchStrict =
+          (gateAccountClient as Record<string, unknown> | undefined)?.fetch as
+            | ((address: PublicKey) => Promise<unknown>)
+            | undefined;
+        try {
+          if (typeof fetchNullable === "function") {
+            gate = await fetchNullable.call(gateAccountClient, gatePda);
+          } else if (typeof fetchStrict === "function") {
+            gate = await fetchStrict.call(gateAccountClient, gatePda);
+          }
+        } catch (error) {
+          if (!sdkFetchError) {
+            sdkFetchError =
+              error instanceof Error ? error : new Error("Unknown Gate account fetch error.");
+          }
+        }
+      }
       if (!gate || typeof gate !== "object") {
-        throw new Error("Gate not found for this gate ID.");
+        throw new Error(
+          `Gate not found for this gate ID.${sdkFetchError ? ` SDK detail: ${sdkFetchError.message}` : ""}`
+        );
       }
 
       const gateObj = gate as Record<string, unknown>;
@@ -1094,8 +1286,15 @@ export default function Page() {
 
       const updates: Partial<MemberFormState> = {};
       const notes: string[] = [];
+      const blockers: string[] = [];
+      const addBlocker = (message: string) => {
+        if (!blockers.includes(message)) {
+          blockers.push(message);
+        }
+      };
       let derivedCount = 0;
       let selectedIdentity = asPublicKeyValue(memberForm.identityAccount);
+      let selectedLink = asPublicKeyValue(memberForm.linkAccount);
 
       if (
         criteriaVariant.type === "minReputation" ||
@@ -1105,7 +1304,7 @@ export default function Page() {
         const vineConfig = asPublicKeyValue(criteriaVariant.config.vineConfig);
         const season = asNumberValue(criteriaVariant.config.season);
         if (vineConfig && season !== undefined) {
-          const [reputationPda] = await findVineReputationPda(
+          const [reputationPda] = VineReputationClient.getReputationPda(
             vineConfig,
             wallet.publicKey,
             season,
@@ -1126,28 +1325,82 @@ export default function Page() {
         criteriaVariant.type === "verifiedWithWallet" ||
         criteriaVariant.type === "combined"
       ) {
-        const grapeSpace = asPublicKeyValue(criteriaVariant.config.grapeSpace);
+        const grapeSpaceInput = asPublicKeyValue(criteriaVariant.config.grapeSpace);
+        const resolvedVerificationSpace = grapeSpaceInput
+          ? await resolveVerificationSpaceContext(connection, grapeSpaceInput)
+          : null;
+        const grapeSpace = resolvedVerificationSpace?.space ?? grapeSpaceInput;
+        const verificationSpaceSaltCandidates = resolvedVerificationSpace?.saltCandidates ?? [];
         const platforms = normalizePlatforms(criteriaVariant.config.platforms);
+        if (!selectedIdentity && !selectedLink && grapeSpace && verificationSpaceSaltCandidates.length > 0) {
+          const walletHashes = uniqueByteArrays(
+            verificationSpaceSaltCandidates.map((spaceSalt) =>
+              GrapeVerificationRegistry.walletHash(spaceSalt, wallet.publicKey!)
+            )
+          );
+          const linked = await findWalletLinkedIdentity({
+            connection,
+            grapeSpace,
+            walletHashes
+          });
+          if (linked) {
+            selectedIdentity = linked.identity;
+            selectedLink = linked.link;
+            notes.push("Resolved identity and wallet link from verification registry.");
+          }
+        }
 
         if (!selectedIdentity) {
           const identityValue = memberForm.identityValue.trim();
           if (grapeSpace && identityValue) {
-            const idHash = await sha256Text(identityValue);
             const platformCandidates = platforms.length > 0 ? platforms : [0];
 
             let fallbackIdentity: PublicKey | undefined;
-            for (const platformSeed of platformCandidates) {
-              const [identityPda] = await findGrapeIdentityPda(
-                grapeSpace,
-                platformSeed,
-                idHash,
-                GRAPE_VERIFICATION_PROGRAM_ID
-              );
-              fallbackIdentity = fallbackIdentity ?? identityPda;
-              const exists = await connection.getAccountInfo(identityPda);
-              if (exists) {
-                selectedIdentity = identityPda;
-                break;
+            if (verificationSpaceSaltCandidates.length > 0) {
+              for (const verificationSpaceSalt of verificationSpaceSaltCandidates) {
+                for (const platformSeed of platformCandidates) {
+                  const tag = PLATFORM_TAGS[platformSeed];
+                  if (!tag) {
+                    continue;
+                  }
+                  const idHash = GrapeVerificationRegistry.identityHash(
+                    verificationSpaceSalt,
+                    tag,
+                    identityValue
+                  );
+                  const [identityPda] = GrapeVerificationRegistry.deriveIdentityPda(
+                    grapeSpace,
+                    platformSeed,
+                    idHash
+                  );
+                  fallbackIdentity = fallbackIdentity ?? identityPda;
+                  const exists = await connection.getAccountInfo(identityPda);
+                  if (exists) {
+                    selectedIdentity = identityPda;
+                    break;
+                  }
+                }
+                if (selectedIdentity) {
+                  break;
+                }
+              }
+            }
+
+            if (!selectedIdentity) {
+              const idHash = await sha256Text(identityValue);
+              for (const platformSeed of platformCandidates) {
+                const [identityPda] = await findGrapeIdentityPda(
+                  grapeSpace,
+                  platformSeed,
+                  idHash,
+                  GRAPE_VERIFICATION_PROGRAM_ID
+                );
+                fallbackIdentity = fallbackIdentity ?? identityPda;
+                const exists = await connection.getAccountInfo(identityPda);
+                if (exists) {
+                  selectedIdentity = identityPda;
+                  break;
+                }
               }
             }
 
@@ -1156,7 +1409,9 @@ export default function Page() {
               notes.push("Identity PDA derived but account existence was not confirmed.");
             }
           } else {
-            notes.push("Identity needs an identity value to derive automatically.");
+            addBlocker(
+              "Identity is required for this gate. Enter Identity Value or Identity Account."
+            );
           }
         }
 
@@ -1173,29 +1428,66 @@ export default function Page() {
           (criteriaVariant.type === "combined" && Boolean(criteriaVariant.config.requireWalletLink));
 
         if (requiresLink) {
-          if (!selectedIdentity) {
-            notes.push("Link PDA derivation needs a resolved identity account.");
+          if (selectedLink) {
+            const nextLink = selectedLink.toBase58();
+            updates.linkAccount = nextLink;
+            if (nextLink !== memberForm.linkAccount.trim()) {
+              derivedCount += 1;
+            }
+          } else if (!selectedIdentity) {
+            addBlocker("Wallet link is required but identity account is missing.");
           } else {
-            const walletHashCandidates: Uint8Array[] = [];
-            const firstHash = await sha256Bytes(wallet.publicKey.toBytes());
-            walletHashCandidates.push(firstHash);
-            const secondHash = await sha256Text(wallet.publicKey.toBase58());
-            if (!Buffer.from(secondHash).equals(Buffer.from(firstHash))) {
-              walletHashCandidates.push(secondHash);
+            if (verificationSpaceSaltCandidates.length > 0) {
+              const registryWalletHashes = uniqueByteArrays(
+                verificationSpaceSaltCandidates.map((spaceSalt) =>
+                  GrapeVerificationRegistry.walletHash(spaceSalt, wallet.publicKey!)
+                )
+              );
+              for (const registryWalletHash of registryWalletHashes) {
+                const [registryLinkPda] = GrapeVerificationRegistry.deriveLinkPda(
+                  selectedIdentity,
+                  registryWalletHash
+                );
+                const registryLinkExists = await connection.getAccountInfo(registryLinkPda);
+                if (registryLinkExists) {
+                  selectedLink = registryLinkPda;
+                  break;
+                }
+                const linkedWallets = await GrapeVerificationRegistry.fetchLinkedWallets(
+                  connection,
+                  selectedIdentity,
+                  registryWalletHash,
+                  GRAPE_VERIFICATION_PROGRAM_ID
+                );
+                const currentWalletLink = linkedWallets.find((entry) => entry.isCurrentWallet);
+                if (currentWalletLink) {
+                  selectedLink = currentWalletLink.pubkey;
+                  break;
+                }
+              }
             }
 
-            let selectedLink: PublicKey | undefined;
-            for (const walletHash of walletHashCandidates) {
-              const [linkPda] = await findGrapeLinkPda(
-                selectedIdentity,
-                walletHash,
-                GRAPE_VERIFICATION_PROGRAM_ID
-              );
-              selectedLink = selectedLink ?? linkPda;
-              const exists = await connection.getAccountInfo(linkPda);
-              if (exists) {
-                selectedLink = linkPda;
-                break;
+            if (!selectedLink) {
+              const walletHashCandidates: Uint8Array[] = [];
+              const firstHash = await sha256Bytes(wallet.publicKey.toBytes());
+              walletHashCandidates.push(firstHash);
+              const secondHash = await sha256Text(wallet.publicKey.toBase58());
+              if (!Buffer.from(secondHash).equals(Buffer.from(firstHash))) {
+                walletHashCandidates.push(secondHash);
+              }
+
+              for (const walletHash of walletHashCandidates) {
+                const [linkPda] = await findGrapeLinkPda(
+                  selectedIdentity,
+                  walletHash,
+                  GRAPE_VERIFICATION_PROGRAM_ID
+                );
+                selectedLink = selectedLink ?? linkPda;
+                const exists = await connection.getAccountInfo(linkPda);
+                if (exists) {
+                  selectedLink = linkPda;
+                  break;
+                }
               }
             }
 
@@ -1206,9 +1498,15 @@ export default function Page() {
                 derivedCount += 1;
               }
             } else {
-              notes.push("Could not derive a link PDA for this wallet.");
+              addBlocker(
+                "Wallet link is required for this gate. Enter Link Account manually if auto-derivation cannot find it."
+              );
             }
           }
+        }
+
+        if (!selectedIdentity) {
+          addBlocker("Could not resolve identity account from current inputs.");
         }
       }
 
@@ -1228,8 +1526,70 @@ export default function Page() {
         }
       }
 
+      const requiresReputation =
+        criteriaVariant.type === "minReputation" ||
+        criteriaVariant.type === "timeLockedReputation" ||
+        criteriaVariant.type === "combined";
+      const requiresIdentity =
+        criteriaVariant.type === "verifiedIdentity" ||
+        criteriaVariant.type === "verifiedWithWallet" ||
+        criteriaVariant.type === "combined";
+      const requiresLink =
+        criteriaVariant.type === "verifiedWithWallet" ||
+        (criteriaVariant.type === "combined" && Boolean(criteriaVariant.config.requireWalletLink));
+
+      const resolvedReputation = asPublicKeyValue(updates.reputationAccount ?? memberForm.reputationAccount);
+      const resolvedIdentity = asPublicKeyValue(updates.identityAccount ?? memberForm.identityAccount);
+      const resolvedLink = asPublicKeyValue(updates.linkAccount ?? memberForm.linkAccount);
+      const grapeSpace = asPublicKeyValue(criteriaVariant.config.grapeSpace);
+
+      const reputationError = await validateProgramOwnedAccount({
+        connection,
+        label: "Reputation account",
+        account: resolvedReputation,
+        expectedOwner: VINE_REPUTATION_PROGRAM_ID,
+        required: requiresReputation
+      });
+      if (reputationError) {
+        addBlocker(reputationError);
+      }
+
+      if (requiresIdentity && grapeSpace && resolvedIdentity?.equals(grapeSpace)) {
+        addBlocker("Identity account cannot be the Grape Space address. Use your identity PDA account.");
+      }
+
+      const identityError = await validateProgramOwnedAccount({
+        connection,
+        label: "Identity account",
+        account: resolvedIdentity,
+        expectedOwner: GRAPE_VERIFICATION_PROGRAM_ID,
+        required: requiresIdentity
+      });
+      if (identityError) {
+        addBlocker(identityError);
+      }
+
+      const linkError = await validateProgramOwnedAccount({
+        connection,
+        label: "Link account",
+        account: resolvedLink,
+        expectedOwner: GRAPE_VERIFICATION_PROGRAM_ID,
+        required: requiresLink
+      });
+      if (linkError) {
+        addBlocker(linkError);
+      }
+
       setMemberForm((prev) => ({ ...prev, ...updates }));
       const mergedForm = { ...memberForm, ...updates };
+      if (blockers.length > 0) {
+        const message = `${blockers.join(" ")}${notes.length ? ` ${notes.join(" ")}` : ""}`;
+        setMemberDerive({ status: "error", message });
+        if (!silent) {
+          notify(message, "error");
+        }
+        return null;
+      }
       const message =
         derivedCount > 0
           ? `Derived ${derivedCount} account(s).${notes.length ? ` ${notes.join(" ")}` : ""}`
@@ -1464,6 +1824,11 @@ export default function Page() {
     setMemberBusy(true);
     try {
       const derivedForm = await handleAutoDeriveMemberAccounts({ silent: true });
+      if (!derivedForm) {
+        throw new Error(
+          "Unable to prepare required accounts. For identity-based gates, provide Identity Value or Identity/Link account and retry."
+        );
+      }
       const effectiveForm = derivedForm ?? memberForm;
 
       const params = {
@@ -1517,7 +1882,7 @@ export default function Page() {
         passed === false ? "info" : "success"
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to check member access.";
+      const message = await formatCheckGateError(error, connection);
       setMemberCheck({ status: "error", message });
       notify(message, "error");
     } finally {
@@ -2582,7 +2947,7 @@ export default function Page() {
                       label="Identity Account (optional)"
                       value={memberForm.identityAccount}
                       onChange={(event) => updateMemberForm("identityAccount", event.target.value)}
-                      helperText="Needed for verified identity gate types."
+                      helperText="Identity PDA account (not the grapeSpace config address)."
                     />
                     <TextField
                       fullWidth
@@ -2746,7 +3111,7 @@ export default function Page() {
                       label="Identity Account (optional)"
                       value={checkForm.identityAccount}
                       onChange={(event) => updateCheckForm("identityAccount", event.target.value)}
-                      helperText="Required for identity verification criteria."
+                      helperText="Identity PDA account (not the grapeSpace config address)."
                     />
                     <TextField
                       fullWidth

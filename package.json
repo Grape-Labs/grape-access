@@ -13,6 +13,8 @@
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
     "@grapenpm/grape-access-sdk": "0.1.0",
+    "@grapenpm/grape-verification-registry": "^0.2.1",
+    "@grapenpm/vine-reputation-client": "^0.1.38",
     "@mui/icons-material": "^6.4.2",
     "@mui/material": "^6.4.2",
     "@solana/wallet-adapter-base": "^0.9.27",
@@ -28,6 +30,7 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@types/bs58": "^4.0.4",
     "@types/node": "^22.10.5",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
