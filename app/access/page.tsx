@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
+import ErrorOutlineRoundedIcon from "@mui/icons-material/ErrorOutlineRounded";
 import ShieldRoundedIcon from "@mui/icons-material/ShieldRounded";
 import {
   Alert,
@@ -10,16 +12,23 @@ import {
   CircularProgress,
   Container,
   Divider,
+  FormControl,
   FormControlLabel,
+  InputLabel,
+  MenuItem,
   Paper,
+  Select,
   Snackbar,
   Stack,
+  Step,
+  StepLabel,
+  Stepper,
   Switch,
   TextField,
   Typography
 } from "@mui/material";
 import { AnchorProvider } from "@coral-xyz/anchor";
-import { useConnection, useWallet } from "@solana/wallet-adapter-react";
+import { useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { Buffer } from "buffer";
@@ -60,6 +69,63 @@ interface MemberDeriveState {
   message: string;
 }
 
+type ClusterKind = "devnet" | "testnet" | "mainnet-beta" | "custom";
+
+interface CommunityAction {
+  label: string;
+  href: string;
+}
+
+interface CommunityProfile {
+  name: string;
+  subtitle: string;
+  accent: string;
+  supportLabel: string;
+  passActions: CommunityAction[];
+  failActions: CommunityAction[];
+}
+
+interface GateContextState {
+  status: "idle" | "loading" | "ready" | "error";
+  message: string;
+  gateId?: string;
+  criteriaVariant?: { type: string; config: Record<string, unknown> };
+  gateTypeLabel?: string;
+  profile: CommunityProfile;
+}
+
+const DEFAULT_COMMUNITY_PROFILE: CommunityProfile = {
+  name: "Grape Community Access",
+  subtitle: "Community-verified access powered by on-chain gate checks.",
+  accent: "#6db8ff",
+  supportLabel: "Need help? Contact your community moderators.",
+  passActions: [
+    { label: "Open Community Hub", href: "https://grape.network" }
+  ],
+  failActions: [
+    { label: "Community Help Center", href: "https://grape.network" }
+  ]
+};
+
+const COMMUNITY_PROFILES_BY_GATE: Record<string, CommunityProfile> = {
+  // Add your real gate IDs here to brand the user experience per community.
+  // "<GATE_PUBLIC_KEY>": {
+  //   name: "My DAO Access",
+  //   subtitle: "Token + identity gated access for verified members.",
+  //   accent: "#22b183",
+  //   supportLabel: "Need help? Open a support ticket in #access-help.",
+  //   passActions: [{ label: "Open Member Dashboard", href: "https://example.com/dashboard" }],
+  //   failActions: [{ label: "How To Qualify", href: "https://example.com/qualify" }]
+  // }
+};
+
+const PLATFORM_LABELS: Record<number, string> = {
+  0: "Discord",
+  1: "Telegram",
+  2: "Twitter",
+  3: "Email"
+};
+
 declare global {
   interface Window {
     Buffer?: typeof Buffer;
@@ -75,12 +141,13 @@ const {
   findGrapeLinkPda
 } = GPassSdk;
 
-const TOKEN_PROGRAM_ID = new PublicKey(
-  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-);
+const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
   "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 );
+const SHYFT_MAINNET_RPC =
+  process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC?.trim() || "https://api.mainnet-beta.solana.com";
+const DEFAULT_CLUSTER: ClusterKind = "mainnet-beta";
 
 const defaultMemberForm: MemberFormState = {
   gateId: "",
@@ -164,6 +231,26 @@ function extractCriteriaVariant(criteria: unknown): { type: string; config: Reco
   return null;
 }
 
+function extractGateTypeLabel(gateType: unknown) {
+  if (!gateType || typeof gateType !== "object") {
+    return "Unknown gate type";
+  }
+  const value = gateType as Record<string, unknown>;
+  if (value.singleUse) {
+    return "Single Use";
+  }
+  if (value.reusable) {
+    return "Reusable";
+  }
+  if (value.timeLimited) {
+    return "Time Limited";
+  }
+  if (value.subscription) {
+    return "Subscription";
+  }
+  return "Unknown gate type";
+}
+
 function asPublicKeyValue(value: unknown): PublicKey | undefined {
   if (!value) {
     return undefined;
@@ -245,9 +332,7 @@ async function resolveSdkClient(
 ) {
   const readOnly = options?.readOnly ?? false;
   const sdkAny = GPassSdk as Record<string, unknown>;
-  const GpassClientCtor = sdkAny.GpassClient as
-    | (new (...args: unknown[]) => unknown)
-    | undefined;
+  const GpassClientCtor = sdkAny.GpassClient as (new (...args: unknown[]) => unknown) | undefined;
 
   if (typeof GpassClientCtor !== "function") {
     throw new Error(
@@ -260,13 +345,10 @@ async function resolveSdkClient(
   }
 
   const fallbackPublicKey = wallet?.publicKey ?? Keypair.generate().publicKey;
-  const signTransaction =
-    wallet?.signTransaction ??
-    (async (transaction: Transaction) => transaction);
+  const signTransaction = wallet?.signTransaction ?? (async (transaction: Transaction) => transaction);
   const signAllTransactions =
     wallet?.signAllTransactions ??
-    (async (transactions: Transaction[]) =>
-      Promise.all(transactions.map((tx) => signTransaction(tx))));
+    (async (transactions: Transaction[]) => Promise.all(transactions.map((tx) => signTransaction(tx))));
 
   const anchorWallet: AnchorCompatibleWallet = {
     publicKey: fallbackPublicKey,
@@ -380,9 +462,101 @@ function explorerLink(signature: string, endpoint: string) {
   return `${base}?cluster=${cluster}`;
 }
 
+function resolveCommunityProfile(gateId: string): CommunityProfile {
+  if (!gateId) {
+    return DEFAULT_COMMUNITY_PROFILE;
+  }
+  return COMMUNITY_PROFILES_BY_GATE[gateId] ?? DEFAULT_COMMUNITY_PROFILE;
+}
+
+function formatPlatformList(platforms: number[]) {
+  if (!platforms.length) {
+    return "any supported platform";
+  }
+  return platforms.map((entry) => PLATFORM_LABELS[entry] ?? `Platform ${entry}`).join(", ");
+}
+
+function renderEligibilitySummary(criteriaVariant?: { type: string; config: Record<string, unknown> }) {
+  if (!criteriaVariant) {
+    return ["Load a valid gate to view eligibility requirements."];
+  }
+
+  const { type, config } = criteriaVariant;
+  switch (type) {
+    case "minReputation": {
+      const minPoints = asNumberValue(config.minPoints) ?? 0;
+      const season = asNumberValue(config.season) ?? 0;
+      return [
+        `Hold at least ${minPoints} reputation points.`,
+        `Reputation season: ${season}.`
+      ];
+    }
+    case "verifiedIdentity": {
+      const platforms = normalizePlatforms(config.platforms);
+      return [`Verify identity on ${formatPlatformList(platforms)}.`];
+    }
+    case "verifiedWithWallet": {
+      const platforms = normalizePlatforms(config.platforms);
+      return [
+        `Verify identity on ${formatPlatformList(platforms)}.`,
+        "Link verified identity to your wallet."
+      ];
+    }
+    case "combined": {
+      const minPoints = asNumberValue(config.minPoints) ?? 0;
+      const season = asNumberValue(config.season) ?? 0;
+      const platforms = normalizePlatforms(config.platforms);
+      const requirements = [
+        `Hold at least ${minPoints} reputation points (season ${season}).`,
+        `Verify identity on ${formatPlatformList(platforms)}.`
+      ];
+      if (Boolean(config.requireWalletLink)) {
+        requirements.push("Wallet link is required.");
+      }
+      return requirements;
+    }
+    case "timeLockedReputation": {
+      const minPoints = asNumberValue(config.minPoints) ?? 0;
+      const season = asNumberValue(config.season) ?? 0;
+      const holdSeconds = asNumberValue(config.minHoldDurationSeconds) ?? 0;
+      return [
+        `Hold at least ${minPoints} reputation points (season ${season}).`,
+        `Maintain score for ${holdSeconds} seconds.`
+      ];
+    }
+    case "multiDao": {
+      const requiredGates = Array.isArray(config.requiredGates) ? config.requiredGates.length : 0;
+      const requireAll = Boolean(config.requireAll);
+      return [
+        requireAll
+          ? `Pass all required gates (${requiredGates} total).`
+          : `Pass at least one required gate (${requiredGates} available).`
+      ];
+    }
+    case "tokenHolding": {
+      const minAmount = asNumberValue(config.minAmount) ?? 0;
+      const checkAta = config.checkAta !== false;
+      return [
+        `Hold at least ${minAmount} tokens from the configured mint.`,
+        checkAta ? "Associated token account check is enabled." : "Custom token account may be required."
+      ];
+    }
+    case "nftCollection": {
+      const minCount = asNumberValue(config.minCount) ?? 1;
+      return [`Hold at least ${minCount} NFT(s) in the required collection.`];
+    }
+    case "customProgram":
+      return ["Custom program criteria applies for this gate."];
+    default:
+      return ["Unknown criteria format. Verify SDK and gate configuration."];
+  }
+}
+
 export default function AccessPage() {
   const wallet = useWallet();
-  const { connection } = useConnection();
+
+  const [cluster, setCluster] = useState<ClusterKind>(DEFAULT_CLUSTER);
+  const [customRpc, setCustomRpc] = useState("");
 
   const [memberForm, setMemberForm] = useState<MemberFormState>(defaultMemberForm);
   const [memberCheck, setMemberCheck] = useState<MemberCheckState>({
@@ -393,15 +567,18 @@ export default function AccessPage() {
     status: "idle",
     message: "Use auto-derive to populate required accounts for your gate."
   });
+  const [gateContext, setGateContext] = useState<GateContextState>({
+    status: "idle",
+    message: "Enter a gate ID to load community profile and requirements.",
+    profile: DEFAULT_COMMUNITY_PROFILE
+  });
 
   const [memberBusy, setMemberBusy] = useState(false);
   const [memberDeriveBusy, setMemberDeriveBusy] = useState(false);
 
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [snackbarMessage, setSnackbarMessage] = useState("");
-  const [snackbarSeverity, setSnackbarSeverity] = useState<"success" | "error" | "info">(
-    "info"
-  );
+  const [snackbarSeverity, setSnackbarSeverity] = useState<"success" | "error" | "info">("info");
 
   useEffect(() => {
     if (typeof window !== "undefined" && !window.Buffer) {
@@ -414,35 +591,79 @@ export default function AccessPage() {
       return;
     }
 
-    const applyGateIdFromLocation = () => {
-      const gateIdFromQuery =
-        new URLSearchParams(window.location.search).get("gateId")?.trim() ?? "";
-      if (!gateIdFromQuery) {
-        return;
-      }
+    const persistedCluster = window.localStorage.getItem("grape_access_cluster");
+    const persistedCustomRpc = window.localStorage.getItem("grape_access_custom_rpc") ?? "";
+    if (
+      persistedCluster === "devnet" ||
+      persistedCluster === "testnet" ||
+      persistedCluster === "mainnet-beta" ||
+      persistedCluster === "custom"
+    ) {
+      setCluster(persistedCluster);
+    }
+    if (persistedCustomRpc) {
+      setCustomRpc(persistedCustomRpc);
+    }
 
+    const params = new URLSearchParams(window.location.search);
+    const gateIdFromQuery = params.get("gateId")?.trim() ?? "";
+    if (gateIdFromQuery) {
       try {
-        new PublicKey(gateIdFromQuery);
+        setMemberForm((prev) => ({ ...prev, gateId: new PublicKey(gateIdFromQuery).toBase58() }));
       } catch {
-        return;
+        // Ignore malformed gate IDs in query params.
       }
+    }
 
-      setMemberForm((prev) =>
-        prev.gateId === gateIdFromQuery
-          ? prev
-          : {
-              ...prev,
-              gateId: gateIdFromQuery
-            }
-      );
-    };
+    const clusterFromQuery = params.get("cluster")?.trim();
+    if (
+      clusterFromQuery === "devnet" ||
+      clusterFromQuery === "testnet" ||
+      clusterFromQuery === "mainnet-beta" ||
+      clusterFromQuery === "custom"
+    ) {
+      setCluster(clusterFromQuery);
+    }
 
-    applyGateIdFromLocation();
-    window.addEventListener("popstate", applyGateIdFromLocation);
-    return () => {
-      window.removeEventListener("popstate", applyGateIdFromLocation);
-    };
+    const rpcFromQuery = params.get("rpc")?.trim();
+    if (rpcFromQuery) {
+      setCustomRpc(rpcFromQuery);
+    }
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem("grape_access_cluster", cluster);
+  }, [cluster]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem("grape_access_custom_rpc", customRpc);
+  }, [customRpc]);
+
+  const rpcEndpoint = useMemo(() => {
+    if (cluster === "custom") {
+      return customRpc.trim();
+    }
+    if (cluster === "mainnet-beta") {
+      return SHYFT_MAINNET_RPC;
+    }
+    if (cluster === "testnet") {
+      return "https://api.testnet.solana.com";
+    }
+    return "https://api.devnet.solana.com";
+  }, [cluster, customRpc]);
+
+  const connection = useMemo(() => {
+    if (!rpcEndpoint) {
+      return null;
+    }
+    return new Connection(rpcEndpoint, "confirmed");
+  }, [rpcEndpoint]);
 
   const isWalletConnected = Boolean(wallet.connected && wallet.publicKey);
   const connectedWalletAddress = wallet.publicKey?.toBase58() ?? "";
@@ -461,6 +682,21 @@ export default function AccessPage() {
     [memberForm, connectedWalletAddress]
   );
 
+  const eligibilitySummary = useMemo(
+    () => renderEligibilitySummary(gateContext.criteriaVariant),
+    [gateContext.criteriaVariant]
+  );
+
+  const progressStep = useMemo(() => {
+    if (!isWalletConnected) {
+      return 0;
+    }
+    if (gateContext.status !== "ready") {
+      return 1;
+    }
+    return 2;
+  }, [isWalletConnected, gateContext.status]);
+
   const notify = (message: string, severity: "success" | "error" | "info") => {
     setSnackbarMessage(message);
     setSnackbarSeverity(severity);
@@ -471,6 +707,25 @@ export default function AccessPage() {
     setMemberForm((prev) => ({ ...prev, [key]: value }));
   };
 
+  const syncUrl = (nextGateId: string) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const nextUrl = new URL(window.location.href);
+    if (nextGateId.trim()) {
+      nextUrl.searchParams.set("gateId", nextGateId.trim());
+    } else {
+      nextUrl.searchParams.delete("gateId");
+    }
+    nextUrl.searchParams.set("cluster", cluster);
+    if (cluster === "custom" && customRpc.trim()) {
+      nextUrl.searchParams.set("rpc", customRpc.trim());
+    } else {
+      nextUrl.searchParams.delete("rpc");
+    }
+    window.history.replaceState({}, "", `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+  };
+
   const copyText = async (text: string) => {
     await navigator.clipboard.writeText(text);
     notify("Copied to clipboard.", "success");
@@ -478,31 +733,29 @@ export default function AccessPage() {
 
   const setMemberGateId = (value: string) => {
     updateMemberForm("gateId", value);
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const nextGateId = value.trim();
-    const nextUrl = new URL(window.location.href);
-    if (nextGateId) {
-      nextUrl.searchParams.set("gateId", nextGateId);
-    } else {
-      nextUrl.searchParams.delete("gateId");
-    }
-    window.history.replaceState({}, "", `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+    syncUrl(value);
   };
+
+  useEffect(() => {
+    syncUrl(memberForm.gateId);
+    // Keep URL network params aligned when user switches cluster/RPC.
+  }, [cluster, customRpc]);
 
   const buildShareLink = (gateIdRaw: string) => {
     const gateId = gateIdRaw.trim();
     if (!gateId) {
       return "";
     }
-    parsePublicKey("Gate ID", gateId, true);
+    const normalizedGateId = parsePublicKey("Gate ID", gateId, true)!.toBase58();
     if (typeof window === "undefined") {
       return "";
     }
     const url = new URL(window.location.origin + "/access");
-    url.searchParams.set("gateId", gateId);
+    url.searchParams.set("gateId", normalizedGateId);
+    url.searchParams.set("cluster", cluster);
+    if (cluster === "custom" && customRpc.trim()) {
+      url.searchParams.set("rpc", customRpc.trim());
+    }
     return url.toString();
   };
 
@@ -520,6 +773,9 @@ export default function AccessPage() {
   };
 
   const getClient = async ({ readOnly = false }: { readOnly?: boolean } = {}) => {
+    if (!connection) {
+      throw new Error("Choose a valid RPC endpoint first.");
+    }
     if (!readOnly && !wallet.publicKey) {
       throw new Error("Connect wallet before checking access.");
     }
@@ -529,11 +785,126 @@ export default function AccessPage() {
     })) as Record<string, unknown>;
   };
 
+  const loadGateContext = async (
+    gateIdRaw: string,
+    { silent = true }: { silent?: boolean } = {}
+  ): Promise<{ criteriaVariant: { type: string; config: Record<string, unknown> } } | null> => {
+    const trimmedGateId = gateIdRaw.trim();
+    if (!trimmedGateId) {
+      setGateContext({
+        status: "idle",
+        message: "Enter a gate ID to load community profile and requirements.",
+        profile: DEFAULT_COMMUNITY_PROFILE
+      });
+      return null;
+    }
+
+    let gateId: PublicKey;
+    try {
+      gateId = parsePublicKey("Gate ID", trimmedGateId, true)!;
+    } catch {
+      if (trimmedGateId.length < 32) {
+        setGateContext({
+          status: "idle",
+          message: "Continue entering the gate ID.",
+          profile: DEFAULT_COMMUNITY_PROFILE
+        });
+      } else {
+        setGateContext({
+          status: "error",
+          message: "Gate ID format is invalid.",
+          profile: DEFAULT_COMMUNITY_PROFILE
+        });
+      }
+      return null;
+    }
+
+    if (!connection) {
+      setGateContext({
+        status: "error",
+        gateId: gateId.toBase58(),
+        message: "Choose a valid RPC endpoint first.",
+        profile: resolveCommunityProfile(gateId.toBase58())
+      });
+      return null;
+    }
+
+    setGateContext((prev) => ({
+      ...prev,
+      status: "loading",
+      gateId: gateId.toBase58(),
+      message: "Loading gate configuration...",
+      profile: resolveCommunityProfile(gateId.toBase58())
+    }));
+
+    try {
+      const client = await getClient({ readOnly: true });
+      const fetchGateMethod = client.fetchGate as ((input: PublicKey) => Promise<unknown>) | undefined;
+
+      if (typeof fetchGateMethod !== "function") {
+        throw new Error("SDK client is missing fetchGate.");
+      }
+
+      const gate = await fetchGateMethod.call(client, gateId);
+      if (!gate || typeof gate !== "object") {
+        throw new Error("Gate not found for this gate ID.");
+      }
+
+      const gateObj = gate as Record<string, unknown>;
+      const criteriaVariant = extractCriteriaVariant(gateObj.criteria);
+      if (!criteriaVariant) {
+        throw new Error("Could not read gate criteria.");
+      }
+
+      setGateContext({
+        status: "ready",
+        gateId: gateId.toBase58(),
+        message: "Gate loaded. You can now auto-derive accounts and run checks.",
+        criteriaVariant,
+        gateTypeLabel: extractGateTypeLabel(gateObj.gateType),
+        profile: resolveCommunityProfile(gateId.toBase58())
+      });
+
+      return { criteriaVariant };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to load gate.";
+      setGateContext({
+        status: "error",
+        gateId: gateId.toBase58(),
+        message,
+        profile: resolveCommunityProfile(gateId.toBase58())
+      });
+      if (!silent) {
+        notify(message, "error");
+      }
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    if (!memberForm.gateId.trim()) {
+      setGateContext({
+        status: "idle",
+        message: "Enter a gate ID to load community profile and requirements.",
+        profile: DEFAULT_COMMUNITY_PROFILE
+      });
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      void loadGateContext(memberForm.gateId, { silent: true });
+    }, 350);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [memberForm.gateId, rpcEndpoint]);
+
   const handleAutoDeriveMemberAccounts = async (
     { silent = false }: { silent?: boolean } = {}
   ): Promise<MemberFormState | null> => {
-    if (!wallet.publicKey) {
-      const message = "Connect wallet first.";
+    if (!wallet.publicKey || !connection) {
+      const message = "Connect wallet and choose a valid RPC endpoint first.";
       setMemberDerive({ status: "error", message });
       if (!silent) {
         notify(message, "error");
@@ -553,25 +924,12 @@ export default function AccessPage() {
 
     setMemberDeriveBusy(true);
     try {
-      const gateId = parsePublicKey("Gate ID", gateIdRaw, true)!;
-      const client = await getClient({ readOnly: true });
-      const fetchGateMethod = client.fetchGate as ((input: PublicKey) => Promise<unknown>) | undefined;
-
-      if (typeof fetchGateMethod !== "function") {
-        throw new Error("SDK client is missing fetchGate.");
-      }
-
-      const gate = await fetchGateMethod.call(client, gateId);
-      if (!gate || typeof gate !== "object") {
+      const loaded = await loadGateContext(gateIdRaw, { silent: true });
+      if (!loaded) {
         throw new Error("Gate not found for this gate ID.");
       }
 
-      const gateObj = gate as Record<string, unknown>;
-      const criteriaVariant = extractCriteriaVariant(gateObj.criteria);
-      if (!criteriaVariant) {
-        throw new Error("Could not read gate criteria for auto-derivation.");
-      }
-
+      const criteriaVariant = loaded.criteriaVariant;
       const updates: Partial<MemberFormState> = {};
       const notes: string[] = [];
       let derivedCount = 0;
@@ -735,8 +1093,8 @@ export default function AccessPage() {
   };
 
   const handleMemberCheck = async () => {
-    if (!wallet.publicKey) {
-      const message = "Connect wallet first.";
+    if (!wallet.publicKey || !connection) {
+      const message = "Connect wallet and choose a valid RPC endpoint first.";
       setMemberCheck({ status: "error", message });
       notify(message, "error");
       return;
@@ -750,11 +1108,7 @@ export default function AccessPage() {
       const params = {
         gateId: parsePublicKey("Gate ID", effectiveForm.gateId, true)!,
         user: wallet.publicKey,
-        reputationAccount: parsePublicKey(
-          "Reputation account",
-          effectiveForm.reputationAccount,
-          false
-        ),
+        reputationAccount: parsePublicKey("Reputation account", effectiveForm.reputationAccount, false),
         identityAccount: parsePublicKey("Identity account", effectiveForm.identityAccount, false),
         linkAccount: parsePublicKey("Link account", effectiveForm.linkAccount, false),
         tokenAccount: parsePublicKey("Token account", effectiveForm.tokenAccount, false),
@@ -800,30 +1154,90 @@ export default function AccessPage() {
     }
   };
 
+  const ctaActions =
+    memberCheck.passed === true
+      ? gateContext.profile.passActions
+      : memberCheck.passed === false
+        ? gateContext.profile.failActions
+        : [];
+
   return (
     <Container maxWidth="md" sx={{ py: { xs: 3, md: 5 } }} className="dramatic-shell">
       <Paper className="panel" sx={{ p: { xs: 2.2, md: 3 } }}>
         <Stack spacing={2.2}>
-          <Stack
-            direction={{ xs: "column", md: "row" }}
-            spacing={1.5}
-            justifyContent="space-between"
-            alignItems={{ xs: "flex-start", md: "center" }}
+          <Box
+            sx={{
+              p: 2,
+              borderRadius: 2,
+              background: `linear-gradient(120deg, ${gateContext.profile.accent}33 0%, rgba(10,16,30,0.6) 60%)`,
+              border: `1px solid ${gateContext.profile.accent}66`
+            }}
           >
-            <Box>
-              <Typography variant="h5">Grape Access User Page</Typography>
-              <Typography color="text.secondary">
-                This page is for members only. Connect wallet, verify gate access, and share your gate link.
-              </Typography>
-            </Box>
-            <WalletMultiButton />
-          </Stack>
+            <Stack
+              direction={{ xs: "column", md: "row" }}
+              spacing={1.5}
+              justifyContent="space-between"
+              alignItems={{ xs: "flex-start", md: "center" }}
+            >
+              <Box>
+                <Typography variant="h5">{gateContext.profile.name}</Typography>
+                <Typography color="text.secondary">{gateContext.profile.subtitle}</Typography>
+                {gateContext.gateTypeLabel && (
+                  <Typography sx={{ mt: 0.7, fontSize: "0.85rem", color: "text.secondary" }}>
+                    Gate Type: {gateContext.gateTypeLabel}
+                  </Typography>
+                )}
+              </Box>
+              <WalletMultiButton />
+            </Stack>
+          </Box>
+
+          <Stepper activeStep={progressStep} alternativeLabel>
+            <Step completed={isWalletConnected}>
+              <StepLabel>Connect Wallet</StepLabel>
+            </Step>
+            <Step completed={gateContext.status === "ready"}>
+              <StepLabel>Load Gate Profile</StepLabel>
+            </Step>
+            <Step completed={memberCheck.status === "success" || memberCheck.status === "error"}>
+              <StepLabel>Run Access Check</StepLabel>
+            </Step>
+          </Stepper>
 
           {!isWalletConnected && (
-            <Alert severity="info">
-              Connect your wallet, then run your access check with the gate ID shared by your community.
-            </Alert>
+            <Alert severity="info">Connect your wallet, then run your access check.</Alert>
           )}
+
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
+            <FormControl fullWidth>
+              <InputLabel>Network</InputLabel>
+              <Select
+                label="Network"
+                value={cluster}
+                onChange={(event) => setCluster(event.target.value as ClusterKind)}
+              >
+                <MenuItem value="mainnet-beta">Mainnet Beta</MenuItem>
+                <MenuItem value="devnet">Devnet</MenuItem>
+                <MenuItem value="testnet">Testnet</MenuItem>
+                <MenuItem value="custom">Custom RPC</MenuItem>
+              </Select>
+            </FormControl>
+            {cluster === "custom" && (
+              <TextField
+                fullWidth
+                label="Custom RPC URL"
+                value={customRpc}
+                onChange={(event) => setCustomRpc(event.target.value)}
+                placeholder="https://..."
+              />
+            )}
+          </Stack>
+
+          <Alert severity={connection ? "info" : "warning"}>
+            {connection
+              ? `Using RPC: ${rpcEndpoint}`
+              : "Custom RPC URL is required before checking this gate."}
+          </Alert>
 
           <TextField
             fullWidth
@@ -833,11 +1247,28 @@ export default function AccessPage() {
             helperText="Public key of the access gate."
           />
 
+          <Alert severity={gateContext.status === "error" ? "error" : gateContext.status === "ready" ? "success" : "info"}>
+            {gateContext.status === "loading" ? "Loading gate profile..." : gateContext.message}
+          </Alert>
+
+          <Paper variant="outlined" sx={{ p: 2, borderColor: "rgba(109, 184, 255, 0.24)" }}>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Eligibility Summary
+            </Typography>
+            <Stack spacing={0.6}>
+              {eligibilitySummary.map((line) => (
+                <Typography key={line} sx={{ fontSize: "0.9rem", color: "text.secondary" }}>
+                  • {line}
+                </Typography>
+              ))}
+            </Stack>
+          </Paper>
+
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
             <Button
               variant="outlined"
               onClick={() => void handleAutoDeriveMemberAccounts()}
-              disabled={memberDeriveBusy || !memberForm.gateId || !isWalletConnected}
+              disabled={memberDeriveBusy || !memberForm.gateId || !isWalletConnected || !connection}
             >
               {memberDeriveBusy ? "Deriving..." : "Auto-Derive Accounts"}
             </Button>
@@ -898,19 +1329,14 @@ export default function AccessPage() {
           />
 
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
-            <Button
-              variant="outlined"
-              onClick={() => void copyText(JSON.stringify(memberPreview, null, 2))}
-            >
+            <Button variant="outlined" onClick={() => void copyText(JSON.stringify(memberPreview, null, 2))}>
               Copy Check Payload
             </Button>
             <Button
               variant="contained"
               onClick={handleMemberCheck}
-              disabled={memberBusy || !isWalletConnected}
-              startIcon={
-                memberBusy ? <CircularProgress size={16} color="inherit" /> : <ShieldRoundedIcon />
-              }
+              disabled={memberBusy || !isWalletConnected || !connection}
+              startIcon={memberBusy ? <CircularProgress size={16} color="inherit" /> : <ShieldRoundedIcon />}
             >
               {memberBusy ? "Checking..." : "Check My Access"}
             </Button>
@@ -919,6 +1345,13 @@ export default function AccessPage() {
           <Divider />
 
           <Alert
+            icon={
+              memberCheck.passed === true ? (
+                <CheckCircleRoundedIcon fontSize="inherit" />
+              ) : memberCheck.passed === false || memberCheck.status === "error" ? (
+                <ErrorOutlineRoundedIcon fontSize="inherit" />
+              ) : undefined
+            }
             severity={
               memberCheck.status === "error"
                 ? "error"
@@ -932,13 +1365,64 @@ export default function AccessPage() {
             {memberCheck.message}
           </Alert>
 
+          {(memberCheck.passed === true || memberCheck.passed === false || memberCheck.status === "error") && (
+            <Paper
+              variant="outlined"
+              sx={{
+                p: 2,
+                borderColor:
+                  memberCheck.passed === true
+                    ? "rgba(61, 215, 164, 0.4)"
+                    : memberCheck.passed === false
+                      ? "rgba(255, 183, 77, 0.45)"
+                      : "rgba(244, 67, 54, 0.4)",
+                backgroundColor:
+                  memberCheck.passed === true
+                    ? "rgba(34, 177, 131, 0.12)"
+                    : memberCheck.passed === false
+                      ? "rgba(255, 167, 38, 0.12)"
+                      : "rgba(244, 67, 54, 0.12)"
+              }}
+            >
+              <Stack spacing={1.2}>
+                <Typography variant="subtitle1">
+                  {memberCheck.passed === true
+                    ? "You are in."
+                    : memberCheck.passed === false
+                      ? "You are close."
+                      : "Action needed."}
+                </Typography>
+                <Typography color="text.secondary">{gateContext.profile.supportLabel}</Typography>
+                <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                  {ctaActions.map((action) => (
+                    <Button
+                      key={action.href + action.label}
+                      href={action.href}
+                      target="_blank"
+                      rel="noreferrer"
+                      variant="outlined"
+                    >
+                      {action.label}
+                    </Button>
+                  ))}
+                  {memberCheck.signature && (
+                    <Button
+                      href={explorerLink(memberCheck.signature, rpcEndpoint)}
+                      target="_blank"
+                      rel="noreferrer"
+                      variant="text"
+                    >
+                      View Transaction
+                    </Button>
+                  )}
+                </Stack>
+              </Stack>
+            </Paper>
+          )}
+
           {memberCheck.signature && (
             <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
-              <Button
-                href={explorerLink(memberCheck.signature, connection.rpcEndpoint)}
-                target="_blank"
-                rel="noreferrer"
-              >
+              <Button href={explorerLink(memberCheck.signature, rpcEndpoint)} target="_blank" rel="noreferrer">
                 View Transaction
               </Button>
               <Button onClick={() => void copyText(memberCheck.signature ?? "")}>Copy Signature</Button>

@@ -13,7 +13,7 @@ It includes:
 - Create gates on-chain
 - Check access on-chain for members or arbitrary wallets
 - Manage existing gates from authority wallets
-- Share deep links for member checks: `/access?gateId=<GATE_PUBLIC_KEY>`
+- Share deep links for member checks: `/access?gateId=<GATE_PUBLIC_KEY>&cluster=<mainnet-beta|devnet|testnet|custom>`
 - Auto-derive common member accounts (reputation PDA, ATA, best-effort identity/link)
 
 ## Tabs
@@ -42,6 +42,7 @@ It includes:
 - Standalone user route: `/access`
 - Alias route: `/user` (redirects to `/access`)
 - Supports deep-link prefill: `/access?gateId=...`
+- Includes network selector so member checks run against the correct RPC/cluster
 
 ## Program IDs Shown In UI
 

@@ -758,8 +758,8 @@ export default function Page() {
       return;
     }
 
-    const gateIdFromQuery =
-      new URLSearchParams(window.location.search).get("gateId")?.trim() ?? "";
+    const searchParams = new URLSearchParams(window.location.search);
+    const gateIdFromQuery = searchParams.get("gateId")?.trim() ?? "";
     if (!gateIdFromQuery) {
       return;
     }
@@ -771,6 +771,14 @@ export default function Page() {
 
     const accessUrl = new URL(window.location.origin + "/access");
     accessUrl.searchParams.set("gateId", gateIdFromQuery);
+    const clusterFromQuery = searchParams.get("cluster")?.trim();
+    const rpcFromQuery = searchParams.get("rpc")?.trim();
+    if (clusterFromQuery) {
+      accessUrl.searchParams.set("cluster", clusterFromQuery);
+    }
+    if (rpcFromQuery) {
+      accessUrl.searchParams.set("rpc", rpcFromQuery);
+    }
     window.location.replace(accessUrl.toString());
   }, []);
 
@@ -913,8 +921,12 @@ export default function Page() {
 
     const url = new URL(window.location.origin + "/access");
     url.searchParams.set("gateId", gateId);
+    url.searchParams.set("cluster", cluster);
+    if (cluster === "custom" && customRpc.trim()) {
+      url.searchParams.set("rpc", customRpc.trim());
+    }
     return url.toString();
-  }, [adminForm.selectedGateId]);
+  }, [adminForm.selectedGateId, cluster, customRpc]);
 
   const notify = (message: string, severity: "success" | "error" | "info") => {
     setSnackbarMessage(message);
@@ -999,6 +1011,10 @@ export default function Page() {
     }
     const url = new URL(window.location.origin + "/access");
     url.searchParams.set("gateId", gateId);
+    url.searchParams.set("cluster", cluster);
+    if (cluster === "custom" && customRpc.trim()) {
+      url.searchParams.set("rpc", customRpc.trim());
+    }
     return url.toString();
   };
 
