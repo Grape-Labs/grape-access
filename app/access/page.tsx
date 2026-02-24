@@ -626,8 +626,10 @@ export default function AccessPage() {
     profile: DEFAULT_COMMUNITY_PROFILE
   });
 
+  const [gateLoadBusy, setGateLoadBusy] = useState(false);
   const [memberBusy, setMemberBusy] = useState(false);
   const [memberDeriveBusy, setMemberDeriveBusy] = useState(false);
+  const [lastRpcProbeSlot, setLastRpcProbeSlot] = useState<number | null>(null);
 
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [snackbarMessage, setSnackbarMessage] = useState("");
@@ -884,6 +886,8 @@ export default function AccessPage() {
     }));
 
     try {
+      const probeSlot = await connection.getSlot("processed");
+      setLastRpcProbeSlot(probeSlot);
       const client = await getClient({ readOnly: true });
       const fetchGateMethod = client.fetchGate as ((input: PublicKey) => Promise<unknown>) | undefined;
 
@@ -905,7 +909,7 @@ export default function AccessPage() {
       setGateContext({
         status: "ready",
         gateId: gateId.toBase58(),
-        message: "Gate loaded. You can now auto-derive accounts and run checks.",
+        message: `Gate loaded (RPC slot ${probeSlot}). You can now auto-derive accounts and run checks.`,
         criteriaVariant,
         gateTypeLabel: extractGateTypeLabel(gateObj.gateType),
         profile: resolveCommunityProfile(gateId.toBase58())
@@ -946,6 +950,27 @@ export default function AccessPage() {
     }
     setCluster(suggestedCluster);
     notify(`Switched network to ${suggestedCluster}.`, "info");
+  };
+
+  const handleLoadGate = async () => {
+    if (!memberForm.gateId.trim()) {
+      notify("Gate ID is required before loading.", "error");
+      return;
+    }
+    if (!connection) {
+      notify("Choose a valid RPC endpoint first.", "error");
+      return;
+    }
+
+    setGateLoadBusy(true);
+    try {
+      const loaded = await loadGateContext(memberForm.gateId, { silent: false });
+      if (loaded) {
+        notify("Gate profile loaded.", "success");
+      }
+    } finally {
+      setGateLoadBusy(false);
+    }
   };
 
   useEffect(() => {
@@ -995,6 +1020,9 @@ export default function AccessPage() {
       if (!loaded) {
         const message = "Unable to derive accounts until gate profile loads successfully.";
         setMemberDerive({ status: "error", message });
+        if (!silent) {
+          notify(message, "error");
+        }
         return null;
       }
 
@@ -1312,6 +1340,21 @@ export default function AccessPage() {
             onChange={(event) => setMemberGateId(event.target.value)}
             helperText="Public key of the access gate."
           />
+
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
+            <Button
+              variant="outlined"
+              onClick={() => void handleLoadGate()}
+              disabled={gateLoadBusy || !memberForm.gateId || !connection}
+            >
+              {gateLoadBusy ? "Loading Gate..." : "Load Gate"}
+            </Button>
+            {lastRpcProbeSlot !== null && (
+              <Typography sx={{ alignSelf: "center", color: "text.secondary", fontSize: "0.84rem" }}>
+                Last RPC Slot Probe: {lastRpcProbeSlot}
+              </Typography>
+            )}
+          </Stack>
 
           <Alert severity={gateContext.status === "error" ? "error" : gateContext.status === "ready" ? "success" : "info"}>
             {gateContext.status === "loading" ? "Loading gate profile..." : gateContext.message}
