@@ -13,7 +13,7 @@ It includes:
 - Create gates on-chain
 - Check access on-chain for members or arbitrary wallets
 - Manage existing gates from authority wallets
-- Share deep links for member checks: `/?gateId=<GATE_PUBLIC_KEY>`
+- Share deep links for member checks: `/access?gateId=<GATE_PUBLIC_KEY>`
 - Auto-derive common member accounts (reputation PDA, ATA, best-effort identity/link)
 
 ## Tabs
@@ -23,24 +23,25 @@ It includes:
 - Criteria and gate type configuration
 - Payload review + initialize transaction
 
-2. `Member Portal`
-- Wallet-first self-check flow
-- `Auto-Derive Accounts`
-- Share link copy (`/?gateId=...`)
-
-3. `Check Access`
+2. `Check Access`
 - Moderator/operator check for any user wallet
 - Manual account overrides for troubleshooting
 
-4. `Admin Console`
+3. `Admin Console`
 - Load gates by authority (read-only supported)
 - Fetch gate details
 - Apply active state
 - Transfer authority
 - Close check record / close gate (with confirmation)
 
-5. `Community Guide`
+4. `Community Guide`
 - Built-in operator/member usage checklist
+
+## Member Page
+
+- Standalone user route: `/access`
+- Alias route: `/user` (redirects to `/access`)
+- Supports deep-link prefill: `/access?gateId=...`
 
 ## Program IDs Shown In UI
 
@@ -100,7 +101,7 @@ NEXT_PUBLIC_SHYFT_MAINNET_RPC=your_shyft_mainnet_rpc_url
 3. Create a gate in `Create Gate`.
 4. Validate with:
    - `Check Access` (known pass + known fail wallets)
-   - `Member Portal` (real member test)
+   - `/access` (real member test)
 5. Share member deep link using `Copy Share Link`.
 
 ## Field Clarifications
@@ -146,7 +147,7 @@ Gate criteria may require:
 - `linkAccount`
 - `tokenAccount`
 
-Use Member Portal `Auto-Derive Accounts` first.
+Use the `/access` page `Auto-Derive Accounts` action first.
 
 ### SDK compatibility errors
 Console expects `@grapenpm/grape-access-sdk` exports compatible with current `GpassClient` method calls.

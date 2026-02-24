@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
@@ -693,7 +693,6 @@ export default function Page() {
   const [adminConfirmAction, setAdminConfirmAction] = useState<AdminConfirmAction>("");
   const [adminRpcProbeSlot, setAdminRpcProbeSlot] = useState<number | null>(null);
   const [adminLoadStatus, setAdminLoadStatus] = useState("Ready");
-  const deepLinkGateIdRef = useRef("");
 
   const [activity, setActivity] = useState<ActivityItem[]>([]);
 
@@ -759,30 +758,20 @@ export default function Page() {
       return;
     }
 
-    const applyDeepLinkFromLocation = () => {
-      const gateIdFromQuery =
-        new URLSearchParams(window.location.search).get("gateId")?.trim() ?? "";
-      if (!gateIdFromQuery || deepLinkGateIdRef.current === gateIdFromQuery) {
-        return;
-      }
+    const gateIdFromQuery =
+      new URLSearchParams(window.location.search).get("gateId")?.trim() ?? "";
+    if (!gateIdFromQuery) {
+      return;
+    }
+    try {
+      new PublicKey(gateIdFromQuery);
+    } catch {
+      return;
+    }
 
-      try {
-        new PublicKey(gateIdFromQuery);
-      } catch {
-        return;
-      }
-
-      deepLinkGateIdRef.current = gateIdFromQuery;
-      setMemberForm((prev) => ({ ...prev, gateId: gateIdFromQuery }));
-      setCheckForm((prev) => ({ ...prev, gateId: prev.gateId || gateIdFromQuery }));
-      setTab(1);
-    };
-
-    applyDeepLinkFromLocation();
-    window.addEventListener("popstate", applyDeepLinkFromLocation);
-    return () => {
-      window.removeEventListener("popstate", applyDeepLinkFromLocation);
-    };
+    const accessUrl = new URL(window.location.origin + "/access");
+    accessUrl.searchParams.set("gateId", gateIdFromQuery);
+    window.location.replace(accessUrl.toString());
   }, []);
 
   const rpcEndpoint = useMemo(() => {
@@ -922,7 +911,7 @@ export default function Page() {
       return "";
     }
 
-    const url = new URL(window.location.origin + window.location.pathname);
+    const url = new URL(window.location.origin + "/access");
     url.searchParams.set("gateId", gateId);
     return url.toString();
   }, [adminForm.selectedGateId]);
@@ -1008,7 +997,7 @@ export default function Page() {
     if (typeof window === "undefined") {
       return "";
     }
-    const url = new URL(window.location.origin + window.location.pathname);
+    const url = new URL(window.location.origin + "/access");
     url.searchParams.set("gateId", gateId);
     return url.toString();
   };
@@ -1029,9 +1018,12 @@ export default function Page() {
   const openMemberPortalForGate = (gateIdRaw: string) => {
     try {
       const gateId = parsePublicKey("Gate ID", gateIdRaw, true)!.toBase58();
-      setMemberGateId(gateId);
-      setTab(1);
-      notify("Opened Member Portal for selected gate.", "info");
+      const accessLink = buildMemberGateLink(gateId);
+      if (!accessLink) {
+        throw new Error("Unable to build user page link.");
+      }
+      window.open(accessLink, "_blank", "noopener,noreferrer");
+      notify("Opened standalone user page.", "info");
     } catch (error) {
       notify(error instanceof Error ? error.message : "Invalid gate ID.", "error");
     }
@@ -2066,11 +2058,10 @@ export default function Page() {
         <Grid size={{ xs: 12 }}>
           <Paper className="panel" sx={{ p: { xs: 2, md: 2.5 } }}>
             <Tabs value={tab} onChange={(_, value: number) => setTab(value)} sx={{ mb: 2 }}>
-              <Tab label="Create Gate" />
-              <Tab label="Member Portal" />
-              <Tab label="Check Access" />
-              <Tab label="Admin Console" />
-              <Tab label="Community Guide" />
+              <Tab label="Create Gate" value={0} />
+              <Tab label="Check Access" value={2} />
+              <Tab label="Admin Console" value={3} />
+              <Tab label="Community Guide" value={4} />
             </Tabs>
 
             {tab === 0 && (
@@ -2947,7 +2938,7 @@ export default function Page() {
                         onClick={() => openMemberPortalForGate(adminForm.selectedGateId)}
                         disabled={!adminForm.selectedGateId}
                       >
-                        Open In Member Portal
+                        Open User Page
                       </Button>
                     </Stack>
                     <TextField
@@ -3148,7 +3139,7 @@ export default function Page() {
                   4. Review payloads, copy them for audit logs, then run on-chain initialization.
                 </Typography>
                 <Typography>
-                  5. Share deep links like <span className="mono">/?gateId=...</span> so members land directly on the right gate.
+                  5. Share deep links like <span className="mono">/access?gateId=...</span> so members land directly on the user page.
                 </Typography>
                 <Typography>
                   6. Members can use Auto-Derive Accounts to avoid manually entering PDA addresses.
