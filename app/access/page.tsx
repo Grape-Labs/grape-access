@@ -462,18 +462,56 @@ function explorerLink(signature: string, endpoint: string) {
   return `${base}?cluster=${cluster}`;
 }
 
-function maskRpcUrl(endpoint: string) {
-  try {
-    const parsed = new URL(endpoint);
-    const base = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
-    const queryMask = parsed.search ? "?***" : "";
-    const hashMask = parsed.hash ? "#***" : "";
-    return `${base}${queryMask}${hashMask}`;
-  } catch {
-    const [withoutQuery] = endpoint.split("?");
-    const [withoutHash] = withoutQuery.split("#");
-    return withoutHash;
+function endpointForCluster(cluster: ClusterKind, customRpc: string) {
+  if (cluster === "custom") {
+    return customRpc.trim() || undefined;
   }
+  if (cluster === "mainnet-beta") {
+    return SHYFT_MAINNET_RPC;
+  }
+  if (cluster === "testnet") {
+    return "https://api.testnet.solana.com";
+  }
+  return "https://api.devnet.solana.com";
+}
+
+async function gateExistsOnConnection(gateId: PublicKey, connection: Connection) {
+  try {
+    const client = (await resolveSdkClient(connection, undefined, { readOnly: true })) as Record<
+      string,
+      unknown
+    >;
+    const fetchGateMethod = client.fetchGate as ((input: PublicKey) => Promise<unknown>) | undefined;
+    if (typeof fetchGateMethod !== "function") {
+      return false;
+    }
+    const gate = await fetchGateMethod.call(client, gateId);
+    return Boolean(gate && typeof gate === "object");
+  } catch {
+    return false;
+  }
+}
+
+async function discoverGateCluster(
+  gateId: PublicKey,
+  currentCluster: ClusterKind,
+  customRpc: string
+): Promise<ClusterKind | null> {
+  const candidates: ClusterKind[] = ["mainnet-beta", "devnet", "testnet", "custom"];
+  for (const candidate of candidates) {
+    if (candidate === currentCluster) {
+      continue;
+    }
+    const endpoint = endpointForCluster(candidate, customRpc);
+    if (!endpoint) {
+      continue;
+    }
+    const candidateConnection = new Connection(endpoint, "confirmed");
+    if (await gateExistsOnConnection(gateId, candidateConnection)) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 function resolveCommunityProfile(gateId: string): CommunityProfile {
@@ -581,6 +619,7 @@ export default function AccessPage() {
     status: "idle",
     message: "Use auto-derive to populate required accounts for your gate."
   });
+  const [suggestedCluster, setSuggestedCluster] = useState<ClusterKind | null>(null);
   const [gateContext, setGateContext] = useState<GateContextState>({
     status: "idle",
     message: "Enter a gate ID to load community profile and requirements.",
@@ -659,18 +698,7 @@ export default function AccessPage() {
     window.localStorage.setItem("grape_access_custom_rpc", customRpc);
   }, [customRpc]);
 
-  const rpcEndpoint = useMemo(() => {
-    if (cluster === "custom") {
-      return customRpc.trim();
-    }
-    if (cluster === "mainnet-beta") {
-      return SHYFT_MAINNET_RPC;
-    }
-    if (cluster === "testnet") {
-      return "https://api.testnet.solana.com";
-    }
-    return "https://api.devnet.solana.com";
-  }, [cluster, customRpc]);
+  const rpcEndpoint = useMemo(() => endpointForCluster(cluster, customRpc) ?? "", [cluster, customRpc]);
 
   const connection = useMemo(() => {
     if (!rpcEndpoint) {
@@ -678,7 +706,6 @@ export default function AccessPage() {
     }
     return new Connection(rpcEndpoint, "confirmed");
   }, [rpcEndpoint]);
-  const rpcDisplayEndpoint = useMemo(() => maskRpcUrl(rpcEndpoint), [rpcEndpoint]);
 
   const isWalletConnected = Boolean(wallet.connected && wallet.publicKey);
   const connectedWalletAddress = wallet.publicKey?.toBase58() ?? "";
@@ -806,6 +833,7 @@ export default function AccessPage() {
   ): Promise<{ criteriaVariant: { type: string; config: Record<string, unknown> } } | null> => {
     const trimmedGateId = gateIdRaw.trim();
     if (!trimmedGateId) {
+      setSuggestedCluster(null);
       setGateContext({
         status: "idle",
         message: "Enter a gate ID to load community profile and requirements.",
@@ -819,12 +847,14 @@ export default function AccessPage() {
       gateId = parsePublicKey("Gate ID", trimmedGateId, true)!;
     } catch {
       if (trimmedGateId.length < 32) {
+        setSuggestedCluster(null);
         setGateContext({
           status: "idle",
           message: "Continue entering the gate ID.",
           profile: DEFAULT_COMMUNITY_PROFILE
         });
       } else {
+        setSuggestedCluster(null);
         setGateContext({
           status: "error",
           message: "Gate ID format is invalid.",
@@ -835,6 +865,7 @@ export default function AccessPage() {
     }
 
     if (!connection) {
+      setSuggestedCluster(null);
       setGateContext({
         status: "error",
         gateId: gateId.toBase58(),
@@ -879,10 +910,23 @@ export default function AccessPage() {
         gateTypeLabel: extractGateTypeLabel(gateObj.gateType),
         profile: resolveCommunityProfile(gateId.toBase58())
       });
+      setSuggestedCluster(null);
 
       return { criteriaVariant };
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to load gate.";
+      let message = error instanceof Error ? error.message : "Failed to load gate.";
+      let nextSuggestedCluster: ClusterKind | null = null;
+      if (message.toLowerCase().includes("gate not found")) {
+        const discoveredCluster = await discoverGateCluster(gateId, cluster, customRpc);
+        if (discoveredCluster) {
+          nextSuggestedCluster = discoveredCluster;
+          message = `Gate not found on ${cluster}. It appears on ${discoveredCluster}. Switch network and try again.`;
+        } else {
+          message =
+            "Gate not found for this gate ID on the selected network. Check cluster/RPC or verify the gate exists on-chain.";
+        }
+      }
+      setSuggestedCluster(nextSuggestedCluster);
       setGateContext({
         status: "error",
         gateId: gateId.toBase58(),
@@ -894,6 +938,14 @@ export default function AccessPage() {
       }
       return null;
     }
+  };
+
+  const applySuggestedNetwork = () => {
+    if (!suggestedCluster) {
+      return;
+    }
+    setCluster(suggestedCluster);
+    notify(`Switched network to ${suggestedCluster}.`, "info");
   };
 
   useEffect(() => {
@@ -939,9 +991,11 @@ export default function AccessPage() {
 
     setMemberDeriveBusy(true);
     try {
-      const loaded = await loadGateContext(gateIdRaw, { silent: true });
+      const loaded = await loadGateContext(gateIdRaw, { silent: false });
       if (!loaded) {
-        throw new Error("Gate not found for this gate ID.");
+        const message = "Unable to derive accounts until gate profile loads successfully.";
+        setMemberDerive({ status: "error", message });
+        return null;
       }
 
       const criteriaVariant = loaded.criteriaVariant;
@@ -1118,6 +1172,9 @@ export default function AccessPage() {
     setMemberBusy(true);
     try {
       const derivedForm = await handleAutoDeriveMemberAccounts({ silent: true });
+      if (!derivedForm) {
+        throw new Error("Unable to prepare required accounts. Resolve gate/network issues and retry.");
+      }
       const effectiveForm = derivedForm ?? memberForm;
 
       const params = {
@@ -1248,12 +1305,6 @@ export default function AccessPage() {
             )}
           </Stack>
 
-          <Alert severity={connection ? "info" : "warning"}>
-            {connection
-              ? `Using RPC: ${rpcDisplayEndpoint}`
-              : "Custom RPC URL is required before checking this gate."}
-          </Alert>
-
           <TextField
             fullWidth
             label="Gate ID"
@@ -1265,6 +1316,15 @@ export default function AccessPage() {
           <Alert severity={gateContext.status === "error" ? "error" : gateContext.status === "ready" ? "success" : "info"}>
             {gateContext.status === "loading" ? "Loading gate profile..." : gateContext.message}
           </Alert>
+          {suggestedCluster && (
+            <Button
+              variant="outlined"
+              onClick={applySuggestedNetwork}
+              sx={{ alignSelf: "flex-start" }}
+            >
+              Switch To {suggestedCluster}
+            </Button>
+          )}
 
           <Paper variant="outlined" sx={{ p: 2, borderColor: "rgba(109, 184, 255, 0.24)" }}>
             <Typography variant="subtitle2" sx={{ mb: 1 }}>
