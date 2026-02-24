@@ -462,6 +462,20 @@ function explorerLink(signature: string, endpoint: string) {
   return `${base}?cluster=${cluster}`;
 }
 
+function maskRpcUrl(endpoint: string) {
+  try {
+    const parsed = new URL(endpoint);
+    const base = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+    const queryMask = parsed.search ? "?***" : "";
+    const hashMask = parsed.hash ? "#***" : "";
+    return `${base}${queryMask}${hashMask}`;
+  } catch {
+    const [withoutQuery] = endpoint.split("?");
+    const [withoutHash] = withoutQuery.split("#");
+    return withoutHash;
+  }
+}
+
 function resolveCommunityProfile(gateId: string): CommunityProfile {
   if (!gateId) {
     return DEFAULT_COMMUNITY_PROFILE;
@@ -664,6 +678,7 @@ export default function AccessPage() {
     }
     return new Connection(rpcEndpoint, "confirmed");
   }, [rpcEndpoint]);
+  const rpcDisplayEndpoint = useMemo(() => maskRpcUrl(rpcEndpoint), [rpcEndpoint]);
 
   const isWalletConnected = Boolean(wallet.connected && wallet.publicKey);
   const connectedWalletAddress = wallet.publicKey?.toBase58() ?? "";
@@ -1235,7 +1250,7 @@ export default function AccessPage() {
 
           <Alert severity={connection ? "info" : "warning"}>
             {connection
-              ? `Using RPC: ${rpcEndpoint}`
+              ? `Using RPC: ${rpcDisplayEndpoint}`
               : "Custom RPC URL is required before checking this gate."}
           </Alert>
 
