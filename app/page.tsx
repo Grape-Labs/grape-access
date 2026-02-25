@@ -79,6 +79,7 @@ const SHYFT_MAINNET_RPC =
   process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC?.trim() ||
   "https://api.mainnet-beta.solana.com";
 const DEFAULT_CLUSTER: ClusterKind = "mainnet-beta";
+const GPASS_ADMIN_WALLET = "GScbAQoP73BsUZDXSpe8yLCteUx7MJn1qzWATZapTbWt";
 
 interface WalletProvider {
   isPhantom?: boolean;
@@ -230,9 +231,15 @@ type AdminBusyAction =
   | "setAuthority"
   | "updateCriteria"
   | "closeGate"
-  | "closeRecord";
+  | "closeRecord"
+  | "emergencyCloseGate";
 
-type AdminConfirmAction = "" | "setAuthority" | "closeGate" | "closeRecord";
+type AdminConfirmAction =
+  | ""
+  | "setAuthority"
+  | "closeGate"
+  | "closeRecord"
+  | "emergencyCloseGate";
 
 const {
   GPASS_PROGRAM_ID,
@@ -1585,6 +1592,8 @@ export default function Page() {
 
   const isWalletConnected = Boolean(wallet.connected && wallet.publicKey);
   const connectedWalletAddress = wallet.publicKey?.toBase58() ?? "";
+  const isAdminWalletConnected =
+    isWalletConnected && connectedWalletAddress === GPASS_ADMIN_WALLET;
   const selectedAdminGate = useMemo(
     () => adminGates.find((gate) => gate.gateId === adminForm.selectedGateId),
     [adminGates, adminForm.selectedGateId]
@@ -3609,6 +3618,44 @@ export default function Page() {
     await handleCreateGate();
   };
 
+  const resolveEmergencyCloseTargetPda = async (
+    gateId: PublicKey,
+    preferredPda?: PublicKey
+  ): Promise<PublicKey> => {
+    if (!connection) {
+      throw new Error("Connection is not ready.");
+    }
+
+    const candidates: PublicKey[] = [];
+    if (preferredPda) {
+      candidates.push(preferredPda);
+    }
+    const [accessPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("access"), gateId.toBuffer()],
+      GPASS_PROGRAM_ID
+    );
+    const [legacyGatePda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("gate"), gateId.toBuffer()],
+      GPASS_PROGRAM_ID
+    );
+    for (const candidate of [accessPda, legacyGatePda]) {
+      if (!candidates.some((entry) => entry.equals(candidate))) {
+        candidates.push(candidate);
+      }
+    }
+
+    for (const candidate of candidates) {
+      const accountInfo = await connection.getAccountInfo(candidate);
+      if (accountInfo && accountInfo.owner.equals(GPASS_PROGRAM_ID)) {
+        return candidate;
+      }
+    }
+
+    throw new Error(
+      "Could not resolve a program-owned gate/access account PDA for emergency close."
+    );
+  };
+
   const handleCloseGate = async () => {
     setAdminBusy("closeGate");
     try {
@@ -3621,6 +3668,11 @@ export default function Page() {
       }
       const gateId = parsePublicKey("Selected gate", adminForm.selectedGateId, true)!;
       const recipient = parsePublicKey("Close recipient", adminForm.closeRecipient, false);
+      const selectedGatePda = parsePublicKey(
+        "Selected gate PDA",
+        selectedAdminGate?.pda ?? "",
+        false
+      );
       const client = await getAdminClient();
       const closeErrors: string[] = [];
       let result: unknown;
@@ -3707,6 +3759,24 @@ export default function Page() {
                   .rpc()
             });
           }
+          if (
+            selectedGatePda &&
+            isAdminWalletConnected &&
+            typeof programMethods.adminCloseAny === "function"
+          ) {
+            directAttempts.push({
+              label: "program.methods.adminCloseAny",
+              run: () =>
+                programMethods
+                  .adminCloseAny()
+                  .accounts({
+                    authority: providerAuthority,
+                    target: selectedGatePda,
+                    recipient: recipient ?? providerAuthority
+                  })
+                  .rpc()
+            });
+          }
 
           for (const attempt of directAttempts) {
             try {
@@ -3722,16 +3792,32 @@ export default function Page() {
       }
 
       if (!closeSucceeded) {
-        const gateStillExists = await fetchGateRecordById(gateId);
+        let gateStillExists = false;
+        if (selectedGatePda && connection) {
+          try {
+            const accountInfo = await connection.getAccountInfo(selectedGatePda);
+            gateStillExists = Boolean(accountInfo);
+          } catch {
+            // Fall through to record fetch fallback.
+          }
+        }
+        if (!gateStillExists) {
+          gateStillExists = Boolean(await fetchGateRecordById(gateId));
+        }
         if (!gateStillExists) {
           notify("Gate account appears already closed on this network.", "info");
           await loadGatesByAuthority({ showSuccessToast: false });
           return;
         }
+        const isLegacyUnknown = selectedAdminGate?.hasKnownStats === false;
+        const legacyHint =
+          isLegacyUnknown && connectedWalletAddress !== GPASS_ADMIN_WALLET
+            ? ` This gate appears to be legacy/unknown and may require emergency admin close by ${GPASS_ADMIN_WALLET}.`
+            : "";
         throw new Error(
           closeErrors.length > 0
-            ? `Close Gate failed. Attempts: ${closeErrors.join(" | ")}`
-            : "Close Gate failed. No compatible close method found."
+            ? `Close Gate failed. Attempts: ${closeErrors.join(" | ")}${legacyHint}`
+            : `Close Gate failed. No compatible close method found.${legacyHint}`
         );
       }
       const signature = extractSignature(result);
@@ -3744,6 +3830,78 @@ export default function Page() {
       await loadGatesByAuthority({ showSuccessToast: false });
     } catch (error) {
       notify(error instanceof Error ? error.message : "Failed to close gate.", "error");
+    } finally {
+      setAdminBusy("");
+    }
+  };
+
+  const handleEmergencyCloseGate = async () => {
+    setAdminBusy("emergencyCloseGate");
+    try {
+      if (!isWalletConnected) {
+        throw new Error("Connect wallet before using emergency close.");
+      }
+      if (!isAdminWalletConnected) {
+        throw new Error(
+          `Emergency close is restricted to admin wallet ${GPASS_ADMIN_WALLET}.`
+        );
+      }
+
+      const gateId = parsePublicKey("Selected gate", adminForm.selectedGateId, true)!;
+      const preferredPda = parsePublicKey(
+        "Selected gate PDA",
+        selectedAdminGate?.pda ?? "",
+        false
+      );
+      const target = await resolveEmergencyCloseTargetPda(gateId, preferredPda);
+      const recipient = parsePublicKey("Close recipient", adminForm.closeRecipient, false);
+
+      const client = await getAdminClient();
+      const program = (client as Record<string, any>).program as
+        | {
+            methods?: Record<string, (...args: unknown[]) => any>;
+            provider?: { wallet?: { publicKey?: PublicKey } };
+          }
+        | undefined;
+
+      const providerAuthority = program?.provider?.wallet?.publicKey ?? wallet.publicKey ?? null;
+      if (!program?.methods || typeof program.methods.adminCloseAny !== "function") {
+        throw new Error("SDK/program does not expose adminCloseAny.");
+      }
+      if (!providerAuthority) {
+        throw new Error("Could not resolve provider authority wallet.");
+      }
+      if (providerAuthority.toBase58() !== GPASS_ADMIN_WALLET) {
+        throw new Error(
+          `Connected signer ${providerAuthority.toBase58()} is not the admin wallet ${GPASS_ADMIN_WALLET}.`
+        );
+      }
+
+      const result = await program.methods
+        .adminCloseAny()
+        .accounts({
+          authority: providerAuthority,
+          target,
+          recipient: recipient ?? providerAuthority
+        })
+        .rpc();
+
+      const signature = extractSignature(result);
+      appendActivity({
+        label: "Emergency Close Gate",
+        message: "Gate/account closed using admin emergency action.",
+        signature
+      });
+      notify(
+        signature
+          ? `Emergency close succeeded. Signature: ${signature}`
+          : "Emergency close succeeded.",
+        "success"
+      );
+      await loadGatesByAuthority({ showSuccessToast: false });
+      await fetchGateDetails({ gateIdInput: gateId.toBase58(), showSuccessToast: false });
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Emergency close failed.", "error");
     } finally {
       setAdminBusy("");
     }
@@ -3806,6 +3964,10 @@ export default function Page() {
     const currentAction = adminConfirmAction;
     setAdminConfirmAction("");
 
+    if (currentAction === "emergencyCloseGate") {
+      await handleEmergencyCloseGate();
+      return;
+    }
     if (currentAction === "setAuthority") {
       await handleSetGateAuthority();
       return;
@@ -3836,6 +3998,12 @@ export default function Page() {
       return {
         title: "Close Gate",
         body: "This will permanently close this gate account and reclaim rent."
+      };
+    }
+    if (adminConfirmAction === "emergencyCloseGate") {
+      return {
+        title: "Emergency Close (Admin)",
+        body: `This uses adminCloseAny and is restricted to ${GPASS_ADMIN_WALLET}. Continue only if you intend to force-close this account.`
       };
     }
     return null;
@@ -5223,6 +5391,15 @@ export default function Page() {
                         to perform write actions.
                       </Alert>
                     )}
+                    {isWalletConnected && !isAdminWalletConnected && (
+                      <Alert severity="info">
+                        Emergency Close is available only when connected as admin wallet{" "}
+                        <Box component="span" className="mono">
+                          {GPASS_ADMIN_WALLET}
+                        </Box>
+                        .
+                      </Alert>
+                    )}
 
                     <TextField
                       fullWidth
@@ -5428,6 +5605,21 @@ export default function Page() {
                           >
                             {adminBusy === "closeGate" ? "Closing..." : "Close Gate"}
                           </Button>
+                          <Button
+                            variant="contained"
+                            color="error"
+                            onClick={() => setAdminConfirmAction("emergencyCloseGate")}
+                            disabled={
+                              adminBusy !== "" ||
+                              !adminForm.selectedGateId ||
+                              !isWalletConnected ||
+                              !isAdminWalletConnected
+                            }
+                          >
+                            {adminBusy === "emergencyCloseGate"
+                              ? "Emergency Closing..."
+                              : "Emergency Close (Admin)"}
+                          </Button>
                         </Stack>
                       </Stack>
                     </Paper>
@@ -5557,7 +5749,13 @@ export default function Page() {
           <Button onClick={() => setAdminConfirmAction("")}>Cancel</Button>
           <Button
             variant="contained"
-            color={adminConfirmAction === "closeGate" || adminConfirmAction === "closeRecord" ? "warning" : "primary"}
+            color={
+              adminConfirmAction === "emergencyCloseGate"
+                ? "error"
+                : adminConfirmAction === "closeGate" || adminConfirmAction === "closeRecord"
+                  ? "warning"
+                  : "primary"
+            }
             onClick={() => void confirmAdminAction()}
             disabled={adminBusy !== ""}
           >
