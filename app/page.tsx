@@ -52,6 +52,7 @@ import {
   Keypair,
   PublicKey,
   SendTransactionError,
+  SystemProgram,
   Transaction,
   clusterApiUrl
 } from "@solana/web3.js";
@@ -205,6 +206,14 @@ interface AdminGateItem {
   statsLabel: string;
 }
 
+interface AdminGateUserItem {
+  pda: string;
+  user: string;
+  passed: boolean;
+  checkedAt: number;
+  checkedAtLabel: string;
+}
+
 interface GateTemplate {
   id: string;
   title: string;
@@ -224,6 +233,7 @@ interface ActivityItem {
 type AdminBusyAction =
   | ""
   | "loadGates"
+  | "loadUsers"
   | "fetchGate"
   | "loadEditor"
   | "updateMetadataUri"
@@ -268,6 +278,16 @@ const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
 );
 
 const createSteps = ["Choose Template", "Configure Gate", "Review & Execute"];
+const primaryTabItems = [
+  { label: "Create Gate", value: 0 },
+  { label: "Check Access", value: 2 },
+  { label: "Admin Console", value: 3 },
+  { label: "Community Gate", value: 4 }
+] as const;
+const CHECK_INSTRUCTION_DISCRIMINATORS = new Set([
+  "097d0319a9f78d68", // checkAccess
+  "71f768eb3121169a" // checkGate (legacy)
+]);
 
 const criteriaOptions: { value: CriteriaKind; label: string }[] = [
   { value: "combined", label: "Reputation + Verified Identity" },
@@ -740,6 +760,89 @@ function readAccessIdFromRawData(data: Buffer | Uint8Array): PublicKey | undefin
     return new PublicKey(bytes.subarray(9, 41));
   } catch {
     return undefined;
+  }
+}
+
+function matchesCheckInstructionDiscriminator(dataBase58: string): boolean {
+  if (!dataBase58) {
+    return false;
+  }
+  try {
+    const bytes = bs58.decode(dataBase58);
+    if (bytes.length < 8) {
+      return false;
+    }
+    const discriminatorHex = Buffer.from(bytes.subarray(0, 8)).toString("hex");
+    return CHECK_INSTRUCTION_DISCRIMINATORS.has(discriminatorHex);
+  } catch {
+    return false;
+  }
+}
+
+function getCheckRecordLikeAccountNamesFromIdl(): string[] {
+  const sdkAny = GPassSdk as Record<string, unknown>;
+  const idl = sdkAny.IDL as { accounts?: Array<{ name?: string }> } | undefined;
+  if (!idl?.accounts) {
+    return [];
+  }
+  return idl.accounts
+    .map((account) => account.name)
+    .filter((name): name is string => Boolean(name && /checkrecord/i.test(name)));
+}
+
+function decodeCheckRecordLikeAccountData(
+  data: Buffer | Uint8Array
+): Record<string, unknown> | null {
+  const sdkAny = GPassSdk as Record<string, unknown>;
+  const idl = sdkAny.IDL;
+  if (!idl) {
+    return null;
+  }
+
+  try {
+    const coder = new BorshAccountsCoder(idl as any);
+    const bytes = Buffer.from(data);
+    const accountNames = getCheckRecordLikeAccountNamesFromIdl();
+    for (const accountName of accountNames) {
+      const discriminator = BorshAccountsCoder.accountDiscriminator(accountName);
+      if (bytes.subarray(0, 8).equals(discriminator)) {
+        return coder.decodeUnchecked(accountName, bytes) as Record<string, unknown>;
+      }
+    }
+  } catch {
+    // Ignore decode failures and let higher-level fallbacks continue.
+  }
+
+  return null;
+}
+
+function readGateCheckRecordFromRawData(
+  data: Buffer | Uint8Array
+): { gate: PublicKey; user: PublicKey; passed: boolean; checkedAt: number } | null {
+  const bytes = Buffer.from(data);
+  if (bytes.length < 83 || bytes.length > 120) {
+    return null;
+  }
+  const passedByte = bytes[73];
+  if (passedByte !== 0 && passedByte !== 1) {
+    return null;
+  }
+  try {
+    const gate = new PublicKey(bytes.subarray(9, 41));
+    const user = new PublicKey(bytes.subarray(41, 73));
+    const checkedAtBig = bytes.readBigInt64LE(74);
+    const maxSafe = BigInt(Number.MAX_SAFE_INTEGER);
+    const minSafe = BigInt(Number.MIN_SAFE_INTEGER);
+    const checkedAt =
+      checkedAtBig > maxSafe || checkedAtBig < minSafe ? 0 : Number(checkedAtBig);
+    return {
+      gate,
+      user,
+      passed: passedByte === 1,
+      checkedAt
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -1295,6 +1398,23 @@ function pickPreferredIrysUri(input: {
   return "";
 }
 
+interface IrysPaymentRequirement {
+  recipient: string;
+  requiredLamports: number;
+  requiredSol?: string;
+  network?: "mainnet" | "devnet" | string;
+}
+
+interface IrysUploadApiResponse {
+  uri?: string;
+  uploaderUrl?: string;
+  gatewayUrl?: string;
+  irysUri?: string;
+  id?: string;
+  error?: string;
+  paymentRequired?: IrysPaymentRequirement;
+}
+
 function extractSignature(result: unknown) {
   if (typeof result === "string") {
     return result;
@@ -1385,6 +1505,17 @@ function explorerLink(signature: string, cluster: ClusterKind) {
   return `${base}?cluster=${cluster}`;
 }
 
+function formatCheckedAt(checkedAt: number): string {
+  if (!Number.isFinite(checkedAt) || checkedAt <= 0) {
+    return "n/a";
+  }
+  const date = new Date(checkedAt * 1000);
+  if (Number.isNaN(date.getTime())) {
+    return "n/a";
+  }
+  return date.toLocaleString();
+}
+
 export default function Page() {
   const wallet = useWallet();
   const [tab, setTab] = useState(0);
@@ -1417,6 +1548,8 @@ export default function Page() {
   });
   const [adminForm, setAdminForm] = useState<AdminFormState>(defaultAdminForm);
   const [adminGates, setAdminGates] = useState<AdminGateItem[]>([]);
+  const [adminGateUsers, setAdminGateUsers] = useState<AdminGateUserItem[]>([]);
+  const [adminGateUsersStatus, setAdminGateUsersStatus] = useState("No users loaded yet.");
   const [adminGateDetails, setAdminGateDetails] = useState<Record<string, unknown> | null>(null);
 
   const [createBusy, setCreateBusy] = useState(false);
@@ -1820,6 +1953,11 @@ export default function Page() {
   ) => {
     setAdminForm((prev) => ({ ...prev, [key]: value }));
   };
+
+  useEffect(() => {
+    setAdminGateUsers([]);
+    setAdminGateUsersStatus("No users loaded yet.");
+  }, [adminForm.selectedGateId]);
 
   const appendActivity = (entry: { label: string; message: string; signature?: string }) => {
     setActivity((prev) => [{ ...entry, createdAt: Date.now() }, ...prev]);
@@ -2717,31 +2855,69 @@ export default function Page() {
     notify("Gate Builder switched to create mode.", "info");
   };
 
+  const submitIrysPayment = async (paymentRequired: IrysPaymentRequirement) => {
+    if (!connection || !wallet.publicKey) {
+      throw new Error("Connect wallet before paying Irys upload fee.");
+    }
+    if (typeof wallet.sendTransaction !== "function") {
+      throw new Error("Connected wallet does not support sendTransaction for Irys payment.");
+    }
+    const recipient = parsePublicKey("Irys recipient", paymentRequired.recipient, true)!;
+    const lamports = Number(paymentRequired.requiredLamports);
+    if (!Number.isFinite(lamports) || lamports <= 0) {
+      throw new Error("Invalid Irys payment quote.");
+    }
+
+    const tx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: wallet.publicKey,
+        toPubkey: recipient,
+        lamports: Math.ceil(lamports)
+      })
+    );
+
+    const signature = await wallet.sendTransaction(tx, connection, {
+      skipPreflight: false
+    });
+    await connection.confirmTransaction(signature, "confirmed");
+    return signature;
+  };
+
   const handleUploadMetadataToIrys = async () => {
     const payload = buildAccessMetadataManifest(createForm);
     setMetadataUploadBusy(true);
     try {
-      const response = await fetch("/api/irys/upload-json", {
+      const requestPayload = {
+        payload,
+        network: resolveIrysNetwork(cluster),
+        filename:
+          createForm.gateId.trim() !== ""
+            ? `grape-access-${createForm.gateId.trim()}.json`
+            : "grape-access-metadata.json"
+      };
+
+      const initialResponse = await fetch("/api/irys/upload-json", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          payload,
-          network: resolveIrysNetwork(cluster),
-          filename:
-            createForm.gateId.trim() !== ""
-              ? `grape-access-${createForm.gateId.trim()}.json`
-              : "grape-access-metadata.json"
-        })
+        body: JSON.stringify(requestPayload)
       });
 
-      const body = (await response.json().catch(() => ({}))) as {
-        uri?: string;
-        uploaderUrl?: string;
-        gatewayUrl?: string;
-        irysUri?: string;
-        id?: string;
-        error?: string;
-      };
+      let response = initialResponse;
+      let body = (await response.json().catch(() => ({}))) as IrysUploadApiResponse;
+
+      if (response.status === 402 && body.paymentRequired) {
+        const paymentSignature = await submitIrysPayment(body.paymentRequired);
+        response = await fetch("/api/irys/upload-json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...requestPayload,
+            payerPublicKey: wallet.publicKey?.toBase58() ?? "",
+            paymentSignature
+          })
+        });
+        body = (await response.json().catch(() => ({}))) as IrysUploadApiResponse;
+      }
 
       if (!response.ok || !pickPreferredIrysUri(body)) {
         throw new Error(body.error || "Failed to upload metadata JSON to Irys.");
@@ -2780,23 +2956,30 @@ export default function Page() {
     }
 
     try {
-      const formData = new FormData();
-      formData.set("file", file);
-      formData.set("network", resolveIrysNetwork(cluster));
+      const buildUploadFormData = () => {
+        const formData = new FormData();
+        formData.set("file", file);
+        formData.set("network", resolveIrysNetwork(cluster));
+        return formData;
+      };
 
-      const response = await fetch("/api/irys/upload-file", {
+      let response = await fetch("/api/irys/upload-file", {
         method: "POST",
-        body: formData
+        body: buildUploadFormData()
       });
 
-      const body = (await response.json().catch(() => ({}))) as {
-        uri?: string;
-        uploaderUrl?: string;
-        gatewayUrl?: string;
-        irysUri?: string;
-        id?: string;
-        error?: string;
-      };
+      let body = (await response.json().catch(() => ({}))) as IrysUploadApiResponse;
+      if (response.status === 402 && body.paymentRequired) {
+        const paymentSignature = await submitIrysPayment(body.paymentRequired);
+        const paidFormData = buildUploadFormData();
+        paidFormData.set("payerPublicKey", wallet.publicKey?.toBase58() ?? "");
+        paidFormData.set("paymentSignature", paymentSignature);
+        response = await fetch("/api/irys/upload-file", {
+          method: "POST",
+          body: paidFormData
+        });
+        body = (await response.json().catch(() => ({}))) as IrysUploadApiResponse;
+      }
       if (!response.ok || !pickPreferredIrysUri(body)) {
         throw new Error(body.error || "Failed to upload file to Irys.");
       }
@@ -3402,6 +3585,259 @@ export default function Page() {
       const message = error instanceof Error ? error.message : "Failed to load gates.";
       setAdminLoadStatus(`Load failed: ${message}`);
       notify(message, "error");
+    } finally {
+      setAdminBusy("");
+    }
+  };
+
+  const loadGateUsers = async ({
+    gateIdInput,
+    showSuccessToast = true
+  }: {
+    gateIdInput?: string;
+    showSuccessToast?: boolean;
+  } = {}) => {
+    const gateId = parsePublicKey("Selected gate", gateIdInput ?? adminForm.selectedGateId, true)!;
+    const gateIdBase58 = gateId.toBase58();
+    const client = await getAdminClient({ readOnly: true });
+    const clientAny = client as Record<string, any>;
+    const checkRecordAccountClient =
+      clientAny.program?.account?.AccessCheckRecord ??
+      clientAny.program?.account?.accessCheckRecord ??
+      clientAny.program?.account?.GateCheckRecord ??
+      clientAny.program?.account?.gateCheckRecord;
+
+    const records: AdminGateUserItem[] = [];
+    let usedTransactionFallback = false;
+    const allMethod =
+      checkRecordAccountClient?.all as ((filters?: unknown[]) => Promise<unknown[]>) | undefined;
+
+    if (typeof allMethod === "function") {
+      try {
+        const fetched = await allMethod.call(checkRecordAccountClient, [
+          { memcmp: { offset: 9, bytes: gateIdBase58 } }
+        ]);
+        for (const entry of Array.isArray(fetched) ? fetched : []) {
+          const account = (entry as any)?.account as Record<string, unknown> | undefined;
+          if (!account) {
+            continue;
+          }
+          const user = toPubkeyString(account.user);
+          if (!user) {
+            continue;
+          }
+          const checkedAt = asNumberValue(account.checkedAt ?? account.checked_at) ?? 0;
+          const passed = asBooleanValue(account.passed) ?? false;
+          const pda =
+            (entry as any)?.publicKey && typeof (entry as any).publicKey.toBase58 === "function"
+              ? (entry as any).publicKey.toBase58()
+              : "";
+          records.push({
+            pda,
+            user,
+            passed,
+            checkedAt,
+            checkedAtLabel: formatCheckedAt(checkedAt)
+          });
+        }
+      } catch {
+        // Fall through to raw scan fallback.
+      }
+    }
+
+    if (records.length === 0 && connection) {
+      const rawMatches = await connection.getProgramAccounts(GPASS_PROGRAM_ID, {
+        filters: [{ memcmp: { offset: 9, bytes: gateIdBase58 } }]
+      });
+      for (const entry of rawMatches) {
+        const decoded = decodeCheckRecordLikeAccountData(entry.account.data);
+        if (decoded) {
+          const accountGate = toPubkeyString(decoded.gate ?? decoded.access);
+          if (accountGate && accountGate !== gateIdBase58) {
+            continue;
+          }
+          const user = toPubkeyString(decoded.user);
+          if (!user) {
+            continue;
+          }
+          const checkedAt = asNumberValue(decoded.checkedAt ?? decoded.checked_at) ?? 0;
+          const passed = asBooleanValue(decoded.passed) ?? false;
+          records.push({
+            pda: entry.pubkey.toBase58(),
+            user,
+            passed,
+            checkedAt,
+            checkedAtLabel: formatCheckedAt(checkedAt)
+          });
+          continue;
+        }
+
+        const rawParsed = readGateCheckRecordFromRawData(entry.account.data);
+        if (!rawParsed || !rawParsed.gate.equals(gateId)) {
+          continue;
+        }
+        records.push({
+          pda: entry.pubkey.toBase58(),
+          user: rawParsed.user.toBase58(),
+          passed: rawParsed.passed,
+          checkedAt: rawParsed.checkedAt,
+          checkedAtLabel: formatCheckedAt(rawParsed.checkedAt)
+        });
+      }
+    }
+
+    if (records.length === 0 && connection) {
+      const [accessPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("access"), gateId.toBuffer()],
+        GPASS_PROGRAM_ID
+      );
+      const [legacyGatePda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("gate"), gateId.toBuffer()],
+        GPASS_PROGRAM_ID
+      );
+      const signatureTargets = [accessPda, legacyGatePda];
+      const signatureMap = new Map<
+        string,
+        { signature: string; blockTime: number | null; slot: number }
+      >();
+
+      for (const target of signatureTargets) {
+        try {
+          const signatureBatch = await connection.getSignaturesForAddress(target, { limit: 120 });
+          for (const item of signatureBatch) {
+            if (item.err) {
+              continue;
+            }
+            if (!signatureMap.has(item.signature)) {
+              signatureMap.set(item.signature, {
+                signature: item.signature,
+                blockTime: item.blockTime ?? null,
+                slot: item.slot
+              });
+            }
+          }
+        } catch {
+          // Ignore per-target signature fetch errors.
+        }
+      }
+
+      const signatureCandidates = Array.from(signatureMap.values())
+        .sort((a, b) => (b.blockTime ?? 0) - (a.blockTime ?? 0))
+        .slice(0, 40);
+
+      const txBatch = await Promise.all(
+        signatureCandidates.map(async (signatureInfo) => {
+          try {
+            const transaction = await connection.getParsedTransaction(signatureInfo.signature, {
+              commitment: "confirmed",
+              maxSupportedTransactionVersion: 0
+            });
+            return { signatureInfo, transaction };
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      const txUsers = new Map<string, AdminGateUserItem>();
+
+      for (const entry of txBatch) {
+        if (!entry?.transaction) {
+          continue;
+        }
+
+        const parsedInstructions = entry.transaction.transaction.message.instructions as Array<any>;
+        for (const instruction of parsedInstructions) {
+          const instructionProgramId =
+            typeof instruction.programId === "string"
+              ? instruction.programId
+              : typeof instruction.programId?.toBase58 === "function"
+                ? instruction.programId.toBase58()
+                : "";
+          if (instructionProgramId !== GPASS_PROGRAM_ID.toBase58()) {
+            continue;
+          }
+          if (!matchesCheckInstructionDiscriminator(instruction.data ?? "")) {
+            continue;
+          }
+
+          const accountList = Array.isArray(instruction.accounts) ? instruction.accounts : [];
+          if (accountList.length < 2) {
+            continue;
+          }
+          const userCandidate = accountList[1];
+          const user =
+            typeof userCandidate === "string"
+              ? userCandidate
+              : typeof userCandidate?.toBase58 === "function"
+                ? userCandidate.toBase58()
+                : "";
+          if (!asPublicKeyValue(user)) {
+            continue;
+          }
+
+          const checkedAt = entry.signatureInfo.blockTime ?? entry.transaction.blockTime ?? 0;
+          if (!txUsers.has(user)) {
+            txUsers.set(user, {
+              pda: `tx:${entry.signatureInfo.signature}`,
+              user,
+              passed: true,
+              checkedAt,
+              checkedAtLabel: formatCheckedAt(checkedAt)
+            });
+          }
+        }
+      }
+
+      if (txUsers.size > 0) {
+        records.push(...Array.from(txUsers.values()));
+        usedTransactionFallback = true;
+      }
+    }
+
+    records.sort((a, b) => b.checkedAt - a.checkedAt);
+    const uniqueByUser = new Map<string, AdminGateUserItem>();
+    for (const record of records) {
+      if (!uniqueByUser.has(record.user)) {
+        uniqueByUser.set(record.user, record);
+      }
+    }
+    const deduped = Array.from(uniqueByUser.values());
+    const passedCount = deduped.filter((entry) => entry.passed).length;
+
+    setAdminGateUsers(deduped);
+    if (deduped.length === 0) {
+      setAdminGateUsersStatus(
+        "No stored user records found for this gate yet, and no recent successful check transactions could be inferred."
+      );
+    } else if (usedTransactionFallback) {
+      setAdminGateUsersStatus(
+        `Loaded ${deduped.length} user(s) from successful check transactions. No stored check-record accounts were found.`
+      );
+    } else {
+      setAdminGateUsersStatus(
+        `Loaded ${deduped.length} user(s). Passing: ${passedCount}. Last update: ${deduped[0].checkedAtLabel}.`
+      );
+    }
+
+    if (showSuccessToast) {
+      notify(
+        deduped.length
+          ? `Loaded ${deduped.length} connected user(s).`
+          : "No stored users found for this gate.",
+        "success"
+      );
+    }
+
+    return deduped;
+  };
+
+  const handleLoadGateUsers = async () => {
+    setAdminBusy("loadUsers");
+    try {
+      await loadGateUsers();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Failed to load users for this gate.", "error");
     } finally {
       setAdminBusy("");
     }
@@ -4058,7 +4494,17 @@ export default function Page() {
               Grape Access Console
             </Typography>
           </Stack>
-          <Stack direction="row" spacing={1} alignItems="center">
+          <Stack
+            direction="row"
+            spacing={1}
+            alignItems="center"
+            sx={{
+              width: { xs: "100%", sm: "auto" },
+              justifyContent: { xs: "space-between", sm: "flex-end" },
+              flexWrap: "wrap",
+              rowGap: 1
+            }}
+          >
             <Tooltip title="Network & RPC settings">
               <IconButton
                 size="small"
@@ -4081,7 +4527,7 @@ export default function Page() {
                 <Paper
                   key={card.label}
                   variant="outlined"
-                  sx={{ p: 1.1, borderRadius: 1.8, flex: 1, minWidth: 0 }}
+                  sx={{ p: 1.1, borderRadius: 1, flex: 1, minWidth: 0 }}
                 >
                   <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1}>
                     <Typography variant="caption" color="text.secondary">
@@ -4107,11 +4553,42 @@ export default function Page() {
 
         <Grid size={{ xs: 12 }}>
           <Paper className="panel" sx={{ p: { xs: 2, md: 2.5 } }}>
-            <Tabs value={tab} onChange={(_, value: number) => setTab(value)} sx={{ mb: 2 }}>
-              <Tab label="Create Gate" value={0} />
-              <Tab label="Check Access" value={2} />
-              <Tab label="Admin Console" value={3} />
-              <Tab label="Community Guide" value={4} />
+            <Stack
+              sx={{
+                mb: 2,
+                display: { xs: "grid", sm: "none" },
+                gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                gap: 1
+              }}
+            >
+              {primaryTabItems.map((item) => (
+                <Button
+                  key={item.value}
+                  variant={tab === item.value ? "contained" : "outlined"}
+                  onClick={() => setTab(item.value)}
+                  sx={{ minHeight: 42, fontSize: "0.82rem", px: 1 }}
+                >
+                  {item.label}
+                </Button>
+              ))}
+            </Stack>
+            <Tabs
+              value={tab}
+              onChange={(_, value: number) => setTab(value)}
+              variant="scrollable"
+              scrollButtons="auto"
+              allowScrollButtonsMobile
+              sx={{
+                mb: 2,
+                display: { xs: "none", sm: "flex" },
+                "& .MuiTab-root": {
+                  minHeight: 42
+                }
+              }}
+            >
+              {primaryTabItems.map((item) => (
+                <Tab key={item.value} label={item.label} value={item.value} />
+              ))}
             </Tabs>
 
             {tab === 0 && (
@@ -5405,13 +5882,9 @@ export default function Page() {
                         to perform write actions.
                       </Alert>
                     )}
-                    {isWalletConnected && !isAdminWalletConnected && (
-                      <Alert severity="info">
-                        Emergency Close is available only when connected as admin wallet{" "}
-                        <Box component="span" className="mono">
-                          {GPASS_ADMIN_WALLET}
-                        </Box>
-                        .
+                    {isAdminWalletConnected && (
+                      <Alert severity="success">
+                        Emergency admin wallet connected. Emergency Close is enabled.
                       </Alert>
                     )}
 
@@ -5482,6 +5955,13 @@ export default function Page() {
                         disabled={adminBusy !== "" || !adminForm.selectedGateId}
                       >
                         {adminBusy === "loadEditor" ? "Loading Editor..." : "Load Into Editor"}
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        onClick={handleLoadGateUsers}
+                        disabled={adminBusy !== "" || !adminForm.selectedGateId || !connection}
+                      >
+                        {adminBusy === "loadUsers" ? "Loading Users..." : "Load Connected Users"}
                       </Button>
                       <Button
                         variant="outlined"
@@ -5619,21 +6099,18 @@ export default function Page() {
                           >
                             {adminBusy === "closeGate" ? "Closing..." : "Close Gate"}
                           </Button>
-                          <Button
-                            variant="contained"
-                            color="error"
-                            onClick={() => setAdminConfirmAction("emergencyCloseGate")}
-                            disabled={
-                              adminBusy !== "" ||
-                              !adminForm.selectedGateId ||
-                              !isWalletConnected ||
-                              !isAdminWalletConnected
-                            }
-                          >
-                            {adminBusy === "emergencyCloseGate"
-                              ? "Emergency Closing..."
-                              : "Emergency Close (Admin)"}
-                          </Button>
+                          {isAdminWalletConnected && (
+                            <Button
+                              variant="contained"
+                              color="error"
+                              onClick={() => setAdminConfirmAction("emergencyCloseGate")}
+                              disabled={adminBusy !== "" || !adminForm.selectedGateId || !isWalletConnected}
+                            >
+                              {adminBusy === "emergencyCloseGate"
+                                ? "Emergency Closing..."
+                                : "Emergency Close (Admin)"}
+                            </Button>
+                          )}
                         </Stack>
                       </Stack>
                     </Paper>
@@ -5660,6 +6137,71 @@ export default function Page() {
                           ? JSON.stringify(adminGateDetails, null, 2)
                           : "No gate details loaded."}
                       </Typography>
+                    </Paper>
+                    <Paper
+                      variant="outlined"
+                      sx={{
+                        p: 2,
+                        maxHeight: 320,
+                        overflow: "auto",
+                        backgroundColor: "rgba(10, 16, 30, 0.92)",
+                        borderColor: "rgba(109, 184, 255, 0.24)"
+                      }}
+                    >
+                      <Stack spacing={1.2}>
+                        <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1}>
+                          <Typography variant="subtitle2" sx={{ color: "text.primary" }}>
+                            Connected Users
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            {adminGateUsers.length} loaded
+                          </Typography>
+                        </Stack>
+                        <Typography variant="caption" color="text.secondary">
+                          {adminGateUsersStatus}
+                        </Typography>
+                        {adminGateUsers.length === 0 ? (
+                          <Typography variant="body2" color="text.secondary">
+                            Press "Load Connected Users" to fetch latest stored check records.
+                          </Typography>
+                        ) : (
+                          <Stack spacing={0.8}>
+                            {adminGateUsers.map((entry) => (
+                              <Paper
+                                key={`${entry.pda}-${entry.user}`}
+                                variant="outlined"
+                                sx={{ p: 1, borderRadius: 1 }}
+                              >
+                                <Stack direction="row" justifyContent="space-between" spacing={1}>
+                                  <Typography
+                                    className="mono"
+                                    sx={{ fontSize: "0.72rem", color: "text.primary", wordBreak: "break-all" }}
+                                  >
+                                    {entry.user}
+                                  </Typography>
+                                  <Typography
+                                    variant="caption"
+                                    color={entry.passed ? "success.light" : "warning.light"}
+                                  >
+                                    {entry.passed ? "PASS" : "FAIL"}
+                                  </Typography>
+                                </Stack>
+                                <Stack direction={{ xs: "column", sm: "row" }} spacing={0.8} sx={{ mt: 0.6 }}>
+                                  <Typography variant="caption" color="text.secondary">
+                                    Checked: {entry.checkedAtLabel}
+                                  </Typography>
+                                  <Button
+                                    size="small"
+                                    onClick={() => updateAdminForm("closeRecordUser", entry.user)}
+                                  >
+                                    Use for Close Record
+                                  </Button>
+                                </Stack>
+                              </Paper>
+                            ))}
+                          </Stack>
+                        )}
+                      </Stack>
                     </Paper>
                   </Stack>
                 </Grid>

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import bs58 from "bs58";
+import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 
 export const runtime = "nodejs";
 
@@ -52,6 +53,113 @@ function resolvePublicIrysBaseUrl() {
   return normalized;
 }
 
+function resolveNetwork(input: string | undefined): "mainnet" | "devnet" {
+  const requested = (input ?? "").toLowerCase();
+  if (requested === "mainnet" || requested === "devnet") {
+    return requested;
+  }
+  return process.env.IRYS_NETWORK?.toLowerCase() === "mainnet" ? "mainnet" : "devnet";
+}
+
+function resolveRpcUrl(network: "mainnet" | "devnet") {
+  const fallbackRpc =
+    network === "mainnet"
+      ? process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC || "https://api.mainnet-beta.solana.com"
+      : "https://api.devnet.solana.com";
+  return process.env.IRYS_SOLANA_RPC_URL?.trim() || fallbackRpc;
+}
+
+function resolveRequiredLamports(quotedLamports: number) {
+  const multiplierRaw = Number.parseFloat(process.env.IRYS_PAYMENT_MULTIPLIER?.trim() || "1.15");
+  const multiplier = Number.isFinite(multiplierRaw) && multiplierRaw > 0 ? multiplierRaw : 1.15;
+  const minLamportsRaw = Number.parseInt(process.env.IRYS_MIN_PAYMENT_LAMPORTS?.trim() || "0", 10);
+  const minLamports = Number.isFinite(minLamportsRaw) && minLamportsRaw > 0 ? minLamportsRaw : 0;
+  const computedLamports = Math.max(1, Math.ceil(quotedLamports * multiplier));
+  return Math.max(computedLamports, minLamports);
+}
+
+function paymentRequiredResponse({
+  recipient,
+  requiredLamports,
+  network,
+  error
+}: {
+  recipient: string;
+  requiredLamports: number;
+  network: "mainnet" | "devnet";
+  error: string;
+}) {
+  return NextResponse.json(
+    {
+      error,
+      paymentRequired: {
+        recipient,
+        requiredLamports,
+        requiredSol: (requiredLamports / 1_000_000_000).toFixed(9),
+        network
+      }
+    },
+    { status: 402 }
+  );
+}
+
+async function verifyPaymentTransfer({
+  rpcUrl,
+  signature,
+  payerPublicKey,
+  recipientPublicKey,
+  minimumLamports
+}: {
+  rpcUrl: string;
+  signature: string;
+  payerPublicKey: PublicKey;
+  recipientPublicKey: PublicKey;
+  minimumLamports: number;
+}) {
+  const connection = new Connection(rpcUrl, "confirmed");
+  const transaction = await connection.getParsedTransaction(signature, {
+    commitment: "confirmed",
+    maxSupportedTransactionVersion: 0
+  });
+  if (!transaction) {
+    return { ok: false, reason: "Payment transaction was not found on-chain yet." };
+  }
+  if (transaction.meta?.err) {
+    return { ok: false, reason: "Payment transaction failed." };
+  }
+
+  const payer = payerPublicKey.toBase58();
+  const recipient = recipientPublicKey.toBase58();
+  const instructions = transaction.transaction.message.instructions;
+  for (const instruction of instructions) {
+    if (!("parsed" in instruction)) {
+      continue;
+    }
+    if (instruction.program !== "system") {
+      continue;
+    }
+    const parsed = instruction.parsed as { type?: string; info?: Record<string, unknown> } | undefined;
+    if (!parsed || parsed.type !== "transfer") {
+      continue;
+    }
+    const source = String(parsed.info?.source ?? parsed.info?.from ?? "");
+    const destination = String(parsed.info?.destination ?? parsed.info?.to ?? "");
+    const lamports = Number(parsed.info?.lamports ?? 0);
+    if (
+      source === payer &&
+      destination === recipient &&
+      Number.isFinite(lamports) &&
+      lamports >= minimumLamports
+    ) {
+      return { ok: true };
+    }
+  }
+  return {
+    ok: false,
+    reason: "Payment transaction does not include the required SOL transfer."
+  };
+}
+
 export async function POST(request: Request) {
   try {
     const form = await request.formData();
@@ -60,11 +168,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Missing file upload." }, { status: 400 });
     }
 
-    const networkInput = String(form.get("network") ?? "").toLowerCase();
-    const network =
-      networkInput === "mainnet" || networkInput === "devnet"
-        ? networkInput
-        : (process.env.IRYS_NETWORK?.toLowerCase() === "mainnet" ? "mainnet" : "devnet");
+    const network = resolveNetwork(String(form.get("network") ?? ""));
+    const rpcUrl = resolveRpcUrl(network);
 
     const secretRaw =
       process.env.IRYS_SOLANA_PRIVATE_KEY?.trim() ||
@@ -88,6 +193,8 @@ export async function POST(request: Request) {
     }
 
     const secretKey = parseSecretKey(secretRaw);
+    const uploaderKeypair = Keypair.fromSecretKey(secretKey);
+    const uploaderAddress = uploaderKeypair.publicKey.toBase58();
     // Load Irys packages at runtime to avoid Next.js bundling issues with optional chain deps.
     const runtimeRequire = eval("require") as NodeRequire;
     const { Uploader } = runtimeRequire("@irys/upload") as {
@@ -97,11 +204,6 @@ export async function POST(request: Request) {
       Solana: unknown;
     };
 
-    const fallbackRpc =
-      network === "mainnet"
-        ? process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC || "https://api.mainnet-beta.solana.com"
-        : "https://api.devnet.solana.com";
-    const rpcUrl = process.env.IRYS_SOLANA_RPC_URL?.trim() || fallbackRpc;
     let builder = Uploader(Solana).withWallet(secretKey).withRpc(rpcUrl);
 
     const bundlerUrl = process.env.IRYS_NODE_URL?.trim();
@@ -111,6 +213,55 @@ export async function POST(request: Request) {
 
     const irys = network === "mainnet" ? await builder.mainnet() : await builder.devnet();
     const fileBuffer = Buffer.from(await file.arrayBuffer());
+    const quotedPrice = await irys.getPrice(fileBuffer.length);
+    const quotedLamports = Number.parseInt(quotedPrice.toString(), 10);
+    if (!Number.isFinite(quotedLamports) || quotedLamports <= 0) {
+      throw new Error("Could not calculate Irys upload price.");
+    }
+    const requiredLamports = resolveRequiredLamports(quotedLamports);
+    const requireUserPayment = (process.env.IRYS_REQUIRE_USER_PAYMENT?.toLowerCase() ?? "true") !== "false";
+
+    if (requireUserPayment) {
+      const payerPublicKeyRaw = String(form.get("payerPublicKey") ?? "").trim();
+      const paymentSignature = String(form.get("paymentSignature") ?? "").trim();
+      if (!payerPublicKeyRaw || !paymentSignature) {
+        return paymentRequiredResponse({
+          recipient: uploaderAddress,
+          requiredLamports,
+          network,
+          error: "User payment is required before uploading to Irys."
+        });
+      }
+
+      let payerPublicKey: PublicKey;
+      try {
+        payerPublicKey = new PublicKey(payerPublicKeyRaw);
+      } catch {
+        return paymentRequiredResponse({
+          recipient: uploaderAddress,
+          requiredLamports,
+          network,
+          error: "Invalid payer public key for Irys payment."
+        });
+      }
+
+      const paymentVerification = await verifyPaymentTransfer({
+        rpcUrl,
+        signature: paymentSignature,
+        payerPublicKey,
+        recipientPublicKey: uploaderKeypair.publicKey,
+        minimumLamports: requiredLamports
+      });
+      if (!paymentVerification.ok) {
+        return paymentRequiredResponse({
+          recipient: uploaderAddress,
+          requiredLamports,
+          network,
+          error: paymentVerification.reason ?? "Invalid Irys payment transaction."
+        });
+      }
+    }
+
     const tags = [
       { name: "Content-Type", value: sanitizeTagValue(file.type || "application/octet-stream") },
       { name: "App-Name", value: "grape-access" },
@@ -130,7 +281,9 @@ export async function POST(request: Request) {
       gatewayUrl: receipt.public || null,
       size: file.size,
       contentType: file.type || "application/octet-stream",
-      network
+      network,
+      chargedLamports: requireUserPayment ? requiredLamports : 0,
+      recipient: requireUserPayment ? uploaderAddress : null
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown Irys upload failure.";
