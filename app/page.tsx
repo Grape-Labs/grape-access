@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
@@ -73,6 +73,8 @@ type CriteriaKind =
 
 type GateTypeKind = "singleUse" | "reusable" | "timeLimited" | "subscription";
 type ClusterKind = "devnet" | "testnet" | "mainnet-beta" | "custom";
+type AccessCheckMode = "simple" | "advanced";
+type GateEditorMode = "create" | "edit";
 const SHYFT_MAINNET_RPC =
   process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC?.trim() ||
   "https://api.mainnet-beta.solana.com";
@@ -136,6 +138,11 @@ interface CheckFormState {
   storeRecord: boolean;
 }
 
+interface CheckDeriveState {
+  status: "idle" | "success" | "error";
+  message: string;
+}
+
 interface MemberFormState {
   gateId: string;
   identityValue: string;
@@ -197,6 +204,7 @@ type AdminBusyAction =
   | ""
   | "loadGates"
   | "fetchGate"
+  | "loadEditor"
   | "setActive"
   | "setAuthority"
   | "updateCriteria"
@@ -291,6 +299,11 @@ const defaultCheckForm: CheckFormState = {
   linkAccount: "",
   tokenAccount: "",
   storeRecord: true
+};
+
+const defaultCheckDeriveState: CheckDeriveState = {
+  status: "idle",
+  message: "Accounts are derived automatically from gate + user wallet."
 };
 
 const defaultMemberForm: MemberFormState = {
@@ -498,6 +511,234 @@ function asNumberValue(value: unknown): number | undefined {
     }
   }
   return undefined;
+}
+
+function asBooleanValue(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    if (value.toLowerCase() === "true") {
+      return true;
+    }
+    if (value.toLowerCase() === "false") {
+      return false;
+    }
+  }
+  return undefined;
+}
+
+function bytesFromUnknown(value: unknown): Uint8Array | null {
+  if (!value) {
+    return null;
+  }
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+  if (value instanceof Buffer) {
+    return Uint8Array.from(value);
+  }
+  if (Array.isArray(value)) {
+    return Uint8Array.from(value.map((entry) => Number(entry) & 0xff));
+  }
+  if (typeof value === "object") {
+    const maybeObject = value as { data?: unknown };
+    if (Array.isArray(maybeObject.data)) {
+      return Uint8Array.from(maybeObject.data.map((entry) => Number(entry) & 0xff));
+    }
+    if (maybeObject.data instanceof Uint8Array) {
+      return Uint8Array.from(maybeObject.data);
+    }
+  }
+  return null;
+}
+
+function toPubkeyString(value: unknown): string {
+  const pk = asPublicKeyValue(value);
+  if (pk) {
+    return pk.toBase58();
+  }
+  return typeof value === "string" ? value : "";
+}
+
+function buildCreateFormUpdatesFromGateData(gateData: Record<string, unknown>): Partial<CreateFormState> {
+  const criteriaVariant = extractCriteriaVariant(gateData.criteria);
+  if (!criteriaVariant) {
+    throw new Error("Could not decode gate criteria.");
+  }
+
+  const updates: Partial<CreateFormState> = {
+    criteriaKind: criteriaVariant.type as CriteriaKind
+  };
+  const gateId = toPubkeyString(gateData.gateId);
+  const authority = toPubkeyString(gateData.authority);
+  if (gateId) {
+    updates.gateId = gateId;
+  }
+  if (authority) {
+    updates.authority = authority;
+  }
+
+  const config = criteriaVariant.config;
+  const minPoints = asNumberValue(config.minPoints);
+  const season = asNumberValue(config.season);
+  const grapeSpace = toPubkeyString(config.grapeSpace);
+  const vineConfig = toPubkeyString(config.vineConfig);
+  const platforms = normalizePlatforms(config.platforms);
+
+  switch (criteriaVariant.type) {
+    case "minReputation": {
+      if (vineConfig) {
+        updates.vineConfig = vineConfig;
+      }
+      if (minPoints !== undefined) {
+        updates.minPoints = String(minPoints);
+      }
+      if (season !== undefined) {
+        updates.season = String(season);
+      }
+      break;
+    }
+    case "verifiedIdentity": {
+      if (grapeSpace) {
+        updates.grapeSpace = grapeSpace;
+      }
+      if (platforms.length > 0) {
+        updates.selectedPlatforms = platforms;
+      }
+      break;
+    }
+    case "verifiedWithWallet": {
+      if (grapeSpace) {
+        updates.grapeSpace = grapeSpace;
+      }
+      if (platforms.length > 0) {
+        updates.selectedPlatforms = platforms;
+      }
+      break;
+    }
+    case "combined": {
+      if (vineConfig) {
+        updates.vineConfig = vineConfig;
+      }
+      if (minPoints !== undefined) {
+        updates.minPoints = String(minPoints);
+      }
+      if (season !== undefined) {
+        updates.season = String(season);
+      }
+      if (grapeSpace) {
+        updates.grapeSpace = grapeSpace;
+      }
+      if (platforms.length > 0) {
+        updates.selectedPlatforms = platforms;
+      }
+      const requireWalletLink = asBooleanValue(config.requireWalletLink);
+      if (requireWalletLink !== undefined) {
+        updates.requireWalletLink = requireWalletLink;
+      }
+      break;
+    }
+    case "timeLockedReputation": {
+      if (vineConfig) {
+        updates.vineConfig = vineConfig;
+      }
+      if (minPoints !== undefined) {
+        updates.minPoints = String(minPoints);
+      }
+      if (season !== undefined) {
+        updates.season = String(season);
+      }
+      const minHold = asNumberValue(config.minHoldDurationSeconds);
+      if (minHold !== undefined) {
+        updates.minHoldDurationSeconds = String(minHold);
+      }
+      break;
+    }
+    case "multiDao": {
+      const requiredRaw = Array.isArray(config.requiredGates) ? config.requiredGates : [];
+      const required = requiredRaw
+        .map((entry) => toPubkeyString(entry))
+        .filter((entry) => Boolean(entry));
+      updates.requiredGates = required.join(", ");
+      const requireAll = asBooleanValue(config.requireAll);
+      if (requireAll !== undefined) {
+        updates.requireAll = requireAll;
+      }
+      break;
+    }
+    case "tokenHolding": {
+      const mint = toPubkeyString(config.mint);
+      if (mint) {
+        updates.mint = mint;
+      }
+      const minAmount = asNumberValue(config.minAmount);
+      if (minAmount !== undefined) {
+        updates.minAmount = String(minAmount);
+      }
+      const checkAta = asBooleanValue(config.checkAta);
+      if (checkAta !== undefined) {
+        updates.checkAta = checkAta;
+      }
+      break;
+    }
+    case "nftCollection": {
+      const collectionMint = toPubkeyString(config.collectionMint);
+      if (collectionMint) {
+        updates.collectionMint = collectionMint;
+      }
+      const minCount = asNumberValue(config.minCount);
+      if (minCount !== undefined) {
+        updates.minCount = String(minCount);
+      }
+      break;
+    }
+    case "customProgram": {
+      const programId = toPubkeyString(config.programId);
+      if (programId) {
+        updates.programId = programId;
+      }
+      const bytes = bytesFromUnknown(config.instructionData);
+      if (bytes) {
+        updates.instructionDataHex = Buffer.from(bytes).toString("hex");
+      }
+      break;
+    }
+    default:
+      break;
+  }
+
+  const gateType = gateData.gateType;
+  if (gateType && typeof gateType === "object") {
+    const gateTypeObj = gateType as Record<string, unknown>;
+    if ("singleUse" in gateTypeObj) {
+      updates.gateTypeKind = "singleUse";
+    } else if ("reusable" in gateTypeObj) {
+      updates.gateTypeKind = "reusable";
+    } else if ("timeLimited" in gateTypeObj) {
+      updates.gateTypeKind = "timeLimited";
+      const cfg =
+        gateTypeObj.timeLimited && typeof gateTypeObj.timeLimited === "object"
+          ? (gateTypeObj.timeLimited as Record<string, unknown>)
+          : null;
+      const duration = cfg ? asNumberValue(cfg.durationSeconds) : undefined;
+      if (duration !== undefined) {
+        updates.durationSeconds = String(duration);
+      }
+    } else if ("subscription" in gateTypeObj) {
+      updates.gateTypeKind = "subscription";
+      const cfg =
+        gateTypeObj.subscription && typeof gateTypeObj.subscription === "object"
+          ? (gateTypeObj.subscription as Record<string, unknown>)
+          : null;
+      const interval = cfg ? asNumberValue(cfg.intervalSeconds) : undefined;
+      if (interval !== undefined) {
+        updates.intervalSeconds = String(interval);
+      }
+    }
+  }
+
+  return updates;
 }
 
 async function validateProgramOwnedAccount({
@@ -819,9 +1060,12 @@ export default function Page() {
   const [tab, setTab] = useState(0);
   const [createStep, setCreateStep] = useState(0);
   const [templateId, setTemplateId] = useState(templates[0].id);
+  const [editorMode, setEditorMode] = useState<GateEditorMode>("create");
+  const [editorTargetGateId, setEditorTargetGateId] = useState("");
 
   const [cluster, setCluster] = useState<ClusterKind>(DEFAULT_CLUSTER);
   const [customRpc, setCustomRpc] = useState("");
+  const [checkAccessMode, setCheckAccessMode] = useState<AccessCheckMode>("simple");
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const [createForm, setCreateForm] = useState<CreateFormState>({
@@ -831,6 +1075,7 @@ export default function Page() {
     gateTypeKind: templates[0].gateTypeKind
   });
   const [checkForm, setCheckForm] = useState<CheckFormState>(defaultCheckForm);
+  const [checkDerive, setCheckDerive] = useState<CheckDeriveState>(defaultCheckDeriveState);
   const [memberForm, setMemberForm] = useState<MemberFormState>(defaultMemberForm);
   const [memberCheck, setMemberCheck] = useState<MemberCheckState>({
     status: "idle",
@@ -846,6 +1091,7 @@ export default function Page() {
 
   const [createBusy, setCreateBusy] = useState(false);
   const [checkBusy, setCheckBusy] = useState(false);
+  const [checkDeriveBusy, setCheckDeriveBusy] = useState(false);
   const [memberBusy, setMemberBusy] = useState(false);
   const [memberDeriveBusy, setMemberDeriveBusy] = useState(false);
   const [adminBusy, setAdminBusy] = useState<AdminBusyAction>("");
@@ -860,6 +1106,7 @@ export default function Page() {
   const [snackbarSeverity, setSnackbarSeverity] = useState<"success" | "error" | "info">(
     "info"
   );
+  const checkDeriveAutoKeyRef = useRef("");
 
   useEffect(() => {
     if (typeof window !== "undefined" && !window.Buffer) {
@@ -870,6 +1117,11 @@ export default function Page() {
   useEffect(() => {
     if (typeof window === "undefined") {
       return;
+    }
+
+    const persistedCheckAccessMode = window.localStorage.getItem("grape_access_check_mode");
+    if (persistedCheckAccessMode === "simple" || persistedCheckAccessMode === "advanced") {
+      setCheckAccessMode(persistedCheckAccessMode);
     }
 
     const persistedCluster = window.localStorage.getItem("grape_access_cluster");
@@ -886,6 +1138,13 @@ export default function Page() {
       setCustomRpc(persistedCustomRpc);
     }
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem("grape_access_check_mode", checkAccessMode);
+  }, [checkAccessMode]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -918,6 +1177,43 @@ export default function Page() {
     }
 
     const searchParams = new URLSearchParams(window.location.search);
+    const clusterFromQuery = searchParams.get("cluster")?.trim();
+    if (
+      clusterFromQuery === "devnet" ||
+      clusterFromQuery === "testnet" ||
+      clusterFromQuery === "mainnet-beta" ||
+      clusterFromQuery === "custom"
+    ) {
+      setCluster(clusterFromQuery);
+    }
+    const rpcFromQuery = searchParams.get("rpc")?.trim();
+    if (rpcFromQuery) {
+      setCustomRpc(rpcFromQuery);
+    }
+
+    const tabFromQuery = searchParams.get("tab")?.trim().toLowerCase();
+    if (tabFromQuery === "admin") {
+      setTab(3);
+    } else if (tabFromQuery === "member") {
+      setTab(1);
+    } else if (tabFromQuery === "check") {
+      setTab(2);
+    } else if (tabFromQuery === "create") {
+      setTab(0);
+    }
+
+    const adminGateFromQuery = searchParams.get("adminGate")?.trim() ?? "";
+    if (adminGateFromQuery) {
+      try {
+        const normalizedGate = new PublicKey(adminGateFromQuery).toBase58();
+        setTab(3);
+        setAdminForm((prev) => ({ ...prev, selectedGateId: normalizedGate }));
+        return;
+      } catch {
+        // Ignore malformed adminGate query param.
+      }
+    }
+
     const gateIdFromQuery = searchParams.get("gateId")?.trim() ?? "";
     if (!gateIdFromQuery) {
       return;
@@ -930,8 +1226,6 @@ export default function Page() {
 
     const accessUrl = new URL(window.location.origin + "/access");
     accessUrl.searchParams.set("gateId", gateIdFromQuery);
-    const clusterFromQuery = searchParams.get("cluster")?.trim();
-    const rpcFromQuery = searchParams.get("rpc")?.trim();
     if (clusterFromQuery) {
       accessUrl.searchParams.set("cluster", clusterFromQuery);
     }
@@ -991,6 +1285,9 @@ export default function Page() {
     }
     return `${Math.round((passed / total) * 100)}%`;
   }, [selectedAdminGate]);
+  const isAdvancedCheckMode = checkAccessMode === "advanced";
+  const isEditMode = editorMode === "edit";
+  const editorGateId = editorTargetGateId || adminForm.selectedGateId.trim();
 
   const programCards = useMemo(
     () => [
@@ -1038,6 +1335,17 @@ export default function Page() {
     }),
     [createForm]
   );
+  const gateBuilderPreview = useMemo(() => {
+    if (!isEditMode) {
+      return createPreview;
+    }
+    return {
+      mode: "edit",
+      targetGateId: editorGateId || "(not set)",
+      action: "updateGateCriteria",
+      criteria: createPreview.criteria
+    };
+  }, [isEditMode, editorGateId, createPreview]);
 
   const checkPreview = useMemo(
     () => ({
@@ -1143,6 +1451,51 @@ export default function Page() {
     >;
   };
 
+  const fetchGateRecordById = async (gateId: PublicKey): Promise<Record<string, unknown> | null> => {
+    const client = await getAdminClient({ readOnly: true });
+    const [gatePda] = await findGatePda(gateId, GPASS_PROGRAM_ID);
+    const fetchGateMethod = client.fetchGate as ((input: PublicKey) => Promise<unknown>) | undefined;
+
+    let gate: unknown = null;
+    if (typeof fetchGateMethod === "function") {
+      try {
+        gate = await fetchGateMethod.call(client, gateId);
+      } catch {
+        gate = null;
+      }
+    }
+
+    if (!gate) {
+      const clientAny = client as Record<string, unknown>;
+      const gateAccountClient =
+        (clientAny.program as Record<string, unknown> | undefined)?.account &&
+        (((clientAny.program as Record<string, unknown>).account as Record<string, unknown>).Gate ??
+          ((clientAny.program as Record<string, unknown>).account as Record<string, unknown>).gate);
+      const fetchNullable =
+        (gateAccountClient as Record<string, unknown> | undefined)?.fetchNullable as
+          | ((address: PublicKey) => Promise<unknown>)
+          | undefined;
+      const fetchStrict =
+        (gateAccountClient as Record<string, unknown> | undefined)?.fetch as
+          | ((address: PublicKey) => Promise<unknown>)
+          | undefined;
+      try {
+        if (typeof fetchNullable === "function") {
+          gate = await fetchNullable.call(gateAccountClient, gatePda);
+        } else if (typeof fetchStrict === "function") {
+          gate = await fetchStrict.call(gateAccountClient, gatePda);
+        }
+      } catch {
+        gate = null;
+      }
+    }
+
+    if (!gate || typeof gate !== "object") {
+      return null;
+    }
+    return gate as Record<string, unknown>;
+  };
+
   const setMemberGateId = (value: string) => {
     updateMemberForm("gateId", value);
     if (typeof window === "undefined") {
@@ -1207,6 +1560,293 @@ export default function Page() {
   const copyMemberShareLink = async () => {
     await copyMemberShareLinkForGate(memberForm.gateId);
   };
+
+  const handleAutoDeriveCheckAccounts = async (
+    { silent = false }: { silent?: boolean } = {}
+  ): Promise<CheckFormState | null> => {
+    if (!connection) {
+      const message = "Choose a valid RPC endpoint first.";
+      setCheckDerive({ status: "error", message });
+      if (!silent) {
+        notify(message, "error");
+      }
+      return null;
+    }
+
+    const gateIdRaw = checkForm.gateId.trim();
+    if (!gateIdRaw) {
+      const message = "Gate ID is required before auto-deriving check accounts.";
+      setCheckDerive({ status: "error", message });
+      if (!silent) {
+        notify(message, "error");
+      }
+      return null;
+    }
+
+    let gateId: PublicKey;
+    let user: PublicKey;
+    try {
+      gateId = parsePublicKey("Gate ID", gateIdRaw, true)!;
+      user = parsePublicKey("User Public Key", checkForm.user, true)!;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Gate ID/User Public Key is invalid.";
+      setCheckDerive({ status: "error", message });
+      if (!silent) {
+        notify(message, "error");
+      }
+      return null;
+    }
+
+    setCheckDeriveBusy(true);
+    try {
+      const gateObj = await fetchGateRecordById(gateId);
+      if (!gateObj) {
+        throw new Error("Gate not found for this gate ID.");
+      }
+
+      const criteriaVariant = extractCriteriaVariant(gateObj.criteria);
+      if (!criteriaVariant) {
+        throw new Error("Could not read gate criteria for auto-derivation.");
+      }
+
+      const updates: Partial<CheckFormState> = {};
+      const notes: string[] = [];
+      const blockers: string[] = [];
+      const addBlocker = (message: string) => {
+        if (!blockers.includes(message)) {
+          blockers.push(message);
+        }
+      };
+      let derivedCount = 0;
+      let selectedIdentity = asPublicKeyValue(checkForm.identityAccount);
+      let selectedLink = asPublicKeyValue(checkForm.linkAccount);
+
+      const requiresReputation =
+        criteriaVariant.type === "minReputation" ||
+        criteriaVariant.type === "timeLockedReputation" ||
+        criteriaVariant.type === "combined";
+      const requiresIdentity =
+        criteriaVariant.type === "verifiedIdentity" ||
+        criteriaVariant.type === "verifiedWithWallet" ||
+        criteriaVariant.type === "combined";
+      const requiresLink =
+        criteriaVariant.type === "verifiedWithWallet" ||
+        (criteriaVariant.type === "combined" && Boolean(criteriaVariant.config.requireWalletLink));
+
+      if (requiresReputation && !checkForm.reputationAccount.trim()) {
+        const vineConfig = asPublicKeyValue(criteriaVariant.config.vineConfig);
+        const season = asNumberValue(criteriaVariant.config.season);
+        if (vineConfig && season !== undefined) {
+          const [reputationPda] = VineReputationClient.getReputationPda(
+            vineConfig,
+            user,
+            season,
+            VINE_REPUTATION_PROGRAM_ID
+          );
+          const nextReputation = reputationPda.toBase58();
+          updates.reputationAccount = nextReputation;
+          if (nextReputation !== checkForm.reputationAccount.trim()) {
+            derivedCount += 1;
+          }
+        } else {
+          notes.push("Could not derive reputation account from gate criteria.");
+        }
+      }
+
+      if (requiresIdentity) {
+        const grapeSpaceInput = asPublicKeyValue(criteriaVariant.config.grapeSpace);
+        const resolvedVerificationSpace = grapeSpaceInput
+          ? await resolveVerificationSpaceContext(connection, grapeSpaceInput)
+          : null;
+        const grapeSpace = resolvedVerificationSpace?.space ?? grapeSpaceInput;
+        const verificationSpaceSaltCandidates = resolvedVerificationSpace?.saltCandidates ?? [];
+
+        if (!selectedIdentity && !selectedLink && grapeSpace && verificationSpaceSaltCandidates.length > 0) {
+          const walletHashes = uniqueByteArrays(
+            verificationSpaceSaltCandidates.map((spaceSalt) =>
+              GrapeVerificationRegistry.walletHash(spaceSalt, user)
+            )
+          );
+          const linked = await findWalletLinkedIdentity({
+            connection,
+            grapeSpace,
+            walletHashes
+          });
+          if (linked) {
+            selectedIdentity = linked.identity;
+            selectedLink = linked.link;
+            notes.push("Resolved identity and wallet link from verification registry.");
+          }
+        }
+
+        if (selectedIdentity) {
+          const nextIdentity = selectedIdentity.toBase58();
+          updates.identityAccount = nextIdentity;
+          if (nextIdentity !== checkForm.identityAccount.trim()) {
+            derivedCount += 1;
+          }
+        } else {
+          addBlocker("Could not auto-resolve identity account for this user wallet.");
+        }
+
+        if (requiresLink) {
+          if (selectedLink) {
+            const nextLink = selectedLink.toBase58();
+            updates.linkAccount = nextLink;
+            if (nextLink !== checkForm.linkAccount.trim()) {
+              derivedCount += 1;
+            }
+          } else if (!selectedIdentity) {
+            addBlocker("Wallet link is required but identity account is missing.");
+          } else {
+            if (verificationSpaceSaltCandidates.length > 0) {
+              const registryWalletHashes = uniqueByteArrays(
+                verificationSpaceSaltCandidates.map((spaceSalt) =>
+                  GrapeVerificationRegistry.walletHash(spaceSalt, user)
+                )
+              );
+              for (const registryWalletHash of registryWalletHashes) {
+                const [registryLinkPda] = GrapeVerificationRegistry.deriveLinkPda(
+                  selectedIdentity,
+                  registryWalletHash
+                );
+                const registryLinkExists = await connection.getAccountInfo(registryLinkPda);
+                if (registryLinkExists) {
+                  selectedLink = registryLinkPda;
+                  break;
+                }
+              }
+            }
+
+            if (selectedLink) {
+              const nextLink = selectedLink.toBase58();
+              updates.linkAccount = nextLink;
+              if (nextLink !== checkForm.linkAccount.trim()) {
+                derivedCount += 1;
+              }
+            } else {
+              addBlocker("Could not auto-resolve link account for this user wallet.");
+            }
+          }
+        }
+      }
+
+      if (criteriaVariant.type === "tokenHolding" && !checkForm.tokenAccount.trim()) {
+        const mint = asPublicKeyValue(criteriaVariant.config.mint);
+        const checkAta = criteriaVariant.config.checkAta !== false;
+        if (mint && checkAta) {
+          const nextTokenAccount = deriveAtaAddress(mint, user).toBase58();
+          updates.tokenAccount = nextTokenAccount;
+          if (nextTokenAccount !== checkForm.tokenAccount.trim()) {
+            derivedCount += 1;
+          }
+        } else if (!checkAta) {
+          notes.push("Gate expects a custom token account (ATA check disabled).");
+        } else {
+          notes.push("Could not derive token ATA from gate criteria.");
+        }
+      }
+
+      const resolvedReputation = asPublicKeyValue(updates.reputationAccount ?? checkForm.reputationAccount);
+      const resolvedIdentity = asPublicKeyValue(updates.identityAccount ?? checkForm.identityAccount);
+      const resolvedLink = asPublicKeyValue(updates.linkAccount ?? checkForm.linkAccount);
+
+      const reputationError = await validateProgramOwnedAccount({
+        connection,
+        label: "Reputation account",
+        account: resolvedReputation,
+        expectedOwner: VINE_REPUTATION_PROGRAM_ID,
+        required: requiresReputation
+      });
+      if (reputationError) {
+        addBlocker(reputationError);
+      }
+
+      const identityError = await validateProgramOwnedAccount({
+        connection,
+        label: "Identity account",
+        account: resolvedIdentity,
+        expectedOwner: GRAPE_VERIFICATION_PROGRAM_ID,
+        required: requiresIdentity
+      });
+      if (identityError) {
+        addBlocker(identityError);
+      }
+
+      const linkError = await validateProgramOwnedAccount({
+        connection,
+        label: "Link account",
+        account: resolvedLink,
+        expectedOwner: GRAPE_VERIFICATION_PROGRAM_ID,
+        required: requiresLink
+      });
+      if (linkError) {
+        addBlocker(linkError);
+      }
+
+      setCheckForm((prev) => ({ ...prev, ...updates }));
+      const mergedForm = { ...checkForm, ...updates };
+      if (blockers.length > 0) {
+        const message = `${blockers.join(" ")}${notes.length ? ` ${notes.join(" ")}` : ""}`;
+        setCheckDerive({ status: "error", message });
+        if (!silent) {
+          notify(message, "error");
+        }
+        return null;
+      }
+
+      const message =
+        derivedCount > 0
+          ? `Auto-derived ${derivedCount} account(s).${notes.length ? ` ${notes.join(" ")}` : ""}`
+          : notes.length
+            ? notes.join(" ")
+            : "Check accounts are already populated.";
+      setCheckDerive({ status: "success", message });
+      if (!silent && derivedCount > 0) {
+        notify(message, "success");
+      }
+      return mergedForm;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to auto-derive check accounts.";
+      setCheckDerive({ status: "error", message });
+      if (!silent) {
+        notify(message, "error");
+      }
+      return null;
+    } finally {
+      setCheckDeriveBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!checkForm.gateId.trim() || !checkForm.user.trim()) {
+      checkDeriveAutoKeyRef.current = "";
+      setCheckDerive(defaultCheckDeriveState);
+    }
+  }, [checkForm.gateId, checkForm.user]);
+
+  useEffect(() => {
+    if (!connection || checkBusy || checkDeriveBusy) {
+      return;
+    }
+    const gateIdRaw = checkForm.gateId.trim();
+    const userRaw = checkForm.user.trim();
+    if (!gateIdRaw || !userRaw) {
+      return;
+    }
+    try {
+      const normalizedGate = new PublicKey(gateIdRaw).toBase58();
+      const normalizedUser = new PublicKey(userRaw).toBase58();
+      const nextKey = `${normalizedGate}:${normalizedUser}:${rpcEndpoint}`;
+      if (checkDeriveAutoKeyRef.current === nextKey) {
+        return;
+      }
+      checkDeriveAutoKeyRef.current = nextKey;
+      void handleAutoDeriveCheckAccounts({ silent: true });
+    } catch {
+      // Ignore invalid pubkeys while user is still typing.
+    }
+  }, [checkForm.gateId, checkForm.user, connection, rpcEndpoint, checkBusy, checkDeriveBusy]);
 
   const handleAutoDeriveMemberAccounts = async (
     { silent = false }: { silent?: boolean } = {}
@@ -1632,7 +2272,23 @@ export default function Page() {
   const generateGateId = () => {
     const generatedGateId = Keypair.generate().publicKey.toBase58();
     updateCreateForm("gateId", generatedGateId);
+    setEditorMode("create");
+    setEditorTargetGateId("");
     notify("Generated a new Gate ID.", "success");
+  };
+
+  const switchEditorToCreateMode = () => {
+    const previousTargetGateId = editorTargetGateId;
+    setEditorMode("create");
+    setEditorTargetGateId("");
+    setCreateForm((prev) => ({
+      ...prev,
+      gateId:
+        previousTargetGateId && prev.gateId.trim() === previousTargetGateId
+          ? ""
+          : prev.gateId
+    }));
+    notify("Gate Builder switched to create mode.", "info");
   };
 
   const buildCriteria = () => {
@@ -1773,18 +2429,25 @@ export default function Page() {
 
     setCheckBusy(true);
     try {
+      const derivedCheckForm = await handleAutoDeriveCheckAccounts({ silent: true });
+      if (!derivedCheckForm) {
+        throw new Error(
+          "Unable to prepare required accounts. Enter gate ID and user wallet, then retry."
+        );
+      }
+      const effectiveCheckForm = derivedCheckForm ?? checkForm;
       const params = {
-        gateId: parsePublicKey("Gate ID", checkForm.gateId, true)!,
-        user: parsePublicKey("User", checkForm.user, true)!,
+        gateId: parsePublicKey("Gate ID", effectiveCheckForm.gateId, true)!,
+        user: parsePublicKey("User", effectiveCheckForm.user, true)!,
         reputationAccount: parsePublicKey(
           "Reputation account",
-          checkForm.reputationAccount,
+          effectiveCheckForm.reputationAccount,
           false
         ),
-        identityAccount: parsePublicKey("Identity account", checkForm.identityAccount, false),
-        linkAccount: parsePublicKey("Link account", checkForm.linkAccount, false),
-        tokenAccount: parsePublicKey("Token account", checkForm.tokenAccount, false),
-        storeRecord: checkForm.storeRecord
+        identityAccount: parsePublicKey("Identity account", effectiveCheckForm.identityAccount, false),
+        linkAccount: parsePublicKey("Link account", effectiveCheckForm.linkAccount, false),
+        tokenAccount: parsePublicKey("Token account", effectiveCheckForm.tokenAccount, false),
+        storeRecord: effectiveCheckForm.storeRecord
       };
 
       const result = await executeSdkMethod({
@@ -1853,7 +2516,7 @@ export default function Page() {
       });
 
       const signature = extractSignature(result);
-      const passed = extractPassStatus(result);
+      const passed = extractPassStatus(result) ?? true;
       const resultMessage =
         passed === true
           ? "Access granted for this gate."
@@ -2114,6 +2777,28 @@ export default function Page() {
     }
   };
 
+  const handleLoadSelectedGateIntoEditor = async () => {
+    setAdminBusy("loadEditor");
+    try {
+      const details = await fetchGateDetails({ showSuccessToast: false });
+      if (!details) {
+        throw new Error("Load gate details first before editing settings.");
+      }
+      const updates = buildCreateFormUpdatesFromGateData(details);
+      setCreateForm((prev) => ({ ...prev, ...updates }));
+      const targetGateId = adminForm.selectedGateId.trim() || updates.gateId || "";
+      setEditorMode("edit");
+      setEditorTargetGateId(targetGateId);
+      setCreateStep(1);
+      setTab(0);
+      notify("Loaded selected gate settings into Gate Builder editor.", "success");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Failed to load gate into editor.", "error");
+    } finally {
+      setAdminBusy("");
+    }
+  };
+
   const handleSetGateActive = async () => {
     setAdminBusy("setActive");
     try {
@@ -2232,6 +2917,18 @@ export default function Page() {
     } finally {
       setAdminBusy("");
     }
+  };
+
+  const handleGateBuilderSubmit = async () => {
+    if (isEditMode) {
+      if (!editorGateId) {
+        notify("No gate selected for edit mode. Load a gate from Admin Console first.", "error");
+        return;
+      }
+      await handleUpdateGateCriteria();
+      return;
+    }
+    await handleCreateGate();
   };
 
   const handleCloseGate = async () => {
@@ -2454,6 +3151,20 @@ export default function Page() {
                     </Step>
                   ))}
                 </Stepper>
+                <Alert
+                  severity={isEditMode ? "warning" : "info"}
+                  action={
+                    isEditMode ? (
+                      <Button size="small" onClick={switchEditorToCreateMode}>
+                        Switch to Create
+                      </Button>
+                    ) : undefined
+                  }
+                >
+                  {isEditMode
+                    ? `Edit mode: updating criteria for gate ${editorGateId || "(not set)"}.`
+                    : "Create mode: initializing a new gate account."}
+                </Alert>
 
                 {createStep === 0 && (
                   <Stack spacing={2}>
@@ -2510,6 +3221,7 @@ export default function Page() {
                           placeholder="Unique public key for this gate"
                           value={createForm.gateId}
                           onChange={(event) => updateCreateForm("gateId", event.target.value)}
+                          disabled={isEditMode}
                           InputProps={{
                             endAdornment: (
                               <InputAdornment position="end">
@@ -2518,13 +3230,18 @@ export default function Page() {
                                   size="small"
                                   sx={{ minWidth: 0, px: 1, py: 0.25, fontSize: "0.72rem" }}
                                   onClick={generateGateId}
+                                  disabled={isEditMode}
                                 >
                                   Generate
                                 </Button>
                               </InputAdornment>
                             )
                           }}
-                          helperText="Unique on-chain identifier for this gate."
+                          helperText={
+                            isEditMode
+                              ? "Locked in edit mode. Switch to create mode to use a different gate ID."
+                              : "Unique on-chain identifier for this gate."
+                          }
                         />
                       </Grid>
                       <Grid size={{ xs: 12, sm: 6 }}>
@@ -2534,7 +3251,12 @@ export default function Page() {
                           placeholder="Defaults to connected wallet"
                           value={createForm.authority}
                           onChange={(event) => updateCreateForm("authority", event.target.value)}
-                          helperText="Wallet allowed to manage this gate. Leave empty to use connected wallet."
+                          disabled={isEditMode}
+                          helperText={
+                            isEditMode
+                              ? "Authority changes are managed in Admin Console."
+                              : "Wallet allowed to manage this gate. Leave empty to use connected wallet."
+                          }
                         />
                       </Grid>
                       <Grid size={{ xs: 12, sm: 6 }}>
@@ -2562,6 +3284,7 @@ export default function Page() {
                           <Select
                             label="Gate Type"
                             value={createForm.gateTypeKind}
+                            disabled={isEditMode}
                             onChange={(event) =>
                               updateCreateForm("gateTypeKind", event.target.value as GateTypeKind)
                             }
@@ -2572,7 +3295,11 @@ export default function Page() {
                               </MenuItem>
                             ))}
                           </Select>
-                          <FormHelperText>Controls how often a user can pass the gate.</FormHelperText>
+                          <FormHelperText>
+                            {isEditMode
+                              ? "Gate type is unchanged in edit mode."
+                              : "Controls how often a user can pass the gate."}
+                          </FormHelperText>
                         </FormControl>
                       </Grid>
                     </Grid>
@@ -2841,7 +3568,9 @@ export default function Page() {
                 {createStep === 2 && (
                   <Stack spacing={2}>
                     <Typography variant="subtitle1">
-                      Review this payload, then initialize the gate on-chain.
+                      {isEditMode
+                        ? "Review the criteria update payload, then apply it to the selected gate."
+                        : "Review this payload, then initialize the gate on-chain."}
                     </Typography>
                     <Paper
                       variant="outlined"
@@ -2858,7 +3587,7 @@ export default function Page() {
                         className="mono"
                         sx={{ m: 0, fontSize: "0.78rem", color: "text.primary" }}
                       >
-                        {JSON.stringify(createPreview, null, 2)}
+                        {JSON.stringify(gateBuilderPreview, null, 2)}
                       </Typography>
                     </Paper>
                     <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
@@ -2867,23 +3596,46 @@ export default function Page() {
                       </Button>
                       <Button
                         variant="outlined"
-                        onClick={() => void copyText(JSON.stringify(createPreview, null, 2))}
+                        onClick={() => void copyText(JSON.stringify(gateBuilderPreview, null, 2))}
                       >
                         Copy Payload
                       </Button>
                       <Button
                         variant="contained"
-                        onClick={handleCreateGate}
-                        disabled={createBusy || !isWalletConnected || !connection}
+                        onClick={handleGateBuilderSubmit}
+                        disabled={
+                          createBusy ||
+                          adminBusy === "updateCriteria" ||
+                          !isWalletConnected ||
+                          !connection ||
+                          (isEditMode && (!editorGateId || !isSelectedGateAuthority))
+                        }
                         startIcon={
-                          createBusy ? <CircularProgress size={16} color="inherit" /> : <ShieldRoundedIcon />
+                          createBusy || adminBusy === "updateCriteria" ? (
+                            <CircularProgress size={16} color="inherit" />
+                          ) : (
+                            <ShieldRoundedIcon />
+                          )
                         }
                       >
-                        {createBusy ? "Initializing..." : "Initialize Gate"}
+                        {isEditMode
+                          ? adminBusy === "updateCriteria"
+                            ? "Updating Criteria..."
+                            : "Update Gate Criteria"
+                          : createBusy
+                            ? "Initializing..."
+                            : "Initialize Gate"}
                       </Button>
                     </Stack>
+                    {isEditMode && !isSelectedGateAuthority && (
+                      <Alert severity="warning">
+                        Connected wallet is not the authority for this selected gate.
+                      </Alert>
+                    )}
                     {!isWalletConnected && (
-                      <Alert severity="info">Connect a wallet to submit gate initialization.</Alert>
+                      <Alert severity="info">
+                        Connect a wallet to submit this on-chain action.
+                      </Alert>
                     )}
                   </Stack>
                 )}
@@ -3083,6 +3835,24 @@ export default function Page() {
                 <Grid size={{ xs: 12, md: 7 }}>
                   <Stack spacing={2}>
                     <Typography variant="subtitle1">Run live gate checks for a user wallet.</Typography>
+                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2} alignItems={{ sm: "center" }}>
+                      <FormControl sx={{ minWidth: 220 }}>
+                        <InputLabel>Check Mode</InputLabel>
+                        <Select
+                          label="Check Mode"
+                          value={checkAccessMode}
+                          onChange={(event) => setCheckAccessMode(event.target.value as AccessCheckMode)}
+                        >
+                          <MenuItem value="simple">Simple</MenuItem>
+                          <MenuItem value="advanced">Advanced</MenuItem>
+                        </Select>
+                      </FormControl>
+                      {!isAdvancedCheckMode && (
+                        <Typography variant="body2" color="text.secondary">
+                          Provide gate + user only. Use advanced mode for manual account overrides.
+                        </Typography>
+                      )}
+                    </Stack>
                     <TextField
                       fullWidth
                       label="Gate ID"
@@ -3097,36 +3867,54 @@ export default function Page() {
                       onChange={(event) => updateCheckForm("user", event.target.value)}
                       helperText="Wallet address of the user being checked."
                     />
-                    <TextField
-                      fullWidth
-                      label="Reputation Account (optional)"
-                      value={checkForm.reputationAccount}
-                      onChange={(event) =>
-                        updateCheckForm("reputationAccount", event.target.value)
-                      }
-                      helperText="Required only for reputation-based criteria."
-                    />
-                    <TextField
-                      fullWidth
-                      label="Identity Account (optional)"
-                      value={checkForm.identityAccount}
-                      onChange={(event) => updateCheckForm("identityAccount", event.target.value)}
-                      helperText="Identity PDA account (not the grapeSpace config address)."
-                    />
-                    <TextField
-                      fullWidth
-                      label="Link Account (optional)"
-                      value={checkForm.linkAccount}
-                      onChange={(event) => updateCheckForm("linkAccount", event.target.value)}
-                      helperText="Needed when wallet-link verification is enabled."
-                    />
-                    <TextField
-                      fullWidth
-                      label="Token Account (optional)"
-                      value={checkForm.tokenAccount}
-                      onChange={(event) => updateCheckForm("tokenAccount", event.target.value)}
-                      helperText="Token account to evaluate for token-holding rules."
-                    />
+                    {isAdvancedCheckMode && (
+                      <Button
+                        variant="outlined"
+                        onClick={() => void handleAutoDeriveCheckAccounts()}
+                        disabled={checkDeriveBusy || checkBusy || !connection || !checkForm.gateId || !checkForm.user}
+                      >
+                        {checkDeriveBusy ? "Deriving..." : "Auto-Derive Accounts"}
+                      </Button>
+                    )}
+                    {(isAdvancedCheckMode || checkDerive.status === "error") && (
+                      <Alert severity={checkDerive.status === "error" ? "error" : "info"}>
+                        {checkDerive.message}
+                      </Alert>
+                    )}
+                    {isAdvancedCheckMode && (
+                      <>
+                        <TextField
+                          fullWidth
+                          label="Reputation Account (optional)"
+                          value={checkForm.reputationAccount}
+                          onChange={(event) =>
+                            updateCheckForm("reputationAccount", event.target.value)
+                          }
+                          helperText="Required only for reputation-based criteria."
+                        />
+                        <TextField
+                          fullWidth
+                          label="Identity Account (optional)"
+                          value={checkForm.identityAccount}
+                          onChange={(event) => updateCheckForm("identityAccount", event.target.value)}
+                          helperText="Identity PDA account (not the grapeSpace config address)."
+                        />
+                        <TextField
+                          fullWidth
+                          label="Link Account (optional)"
+                          value={checkForm.linkAccount}
+                          onChange={(event) => updateCheckForm("linkAccount", event.target.value)}
+                          helperText="Needed when wallet-link verification is enabled."
+                        />
+                        <TextField
+                          fullWidth
+                          label="Token Account (optional)"
+                          value={checkForm.tokenAccount}
+                          onChange={(event) => updateCheckForm("tokenAccount", event.target.value)}
+                          helperText="Token account to evaluate for token-holding rules."
+                        />
+                      </>
+                    )}
                     <FormControlLabel
                       control={
                         <Switch
@@ -3136,24 +3924,54 @@ export default function Page() {
                       }
                       label="Store gate check record on-chain"
                     />
-                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
-                      <Button
-                        variant="outlined"
-                        onClick={() => void copyText(JSON.stringify(checkPreview, null, 2))}
-                      >
-                        Copy Check Params
-                      </Button>
+                    {isAdvancedCheckMode ? (
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
+                        <Button
+                          variant="outlined"
+                          onClick={() => void copyText(JSON.stringify(checkPreview, null, 2))}
+                        >
+                          Copy Check Params
+                        </Button>
+                          <Button
+                            variant="contained"
+                            onClick={handleCheckGate}
+                            disabled={
+                            checkBusy ||
+                            checkDeriveBusy ||
+                            !isWalletConnected ||
+                            !connection ||
+                            !checkForm.gateId ||
+                            !checkForm.user
+                            }
+                            startIcon={
+                              checkBusy ? <CircularProgress size={16} color="inherit" /> : <ShieldRoundedIcon />
+                            }
+                        >
+                          {checkBusy ? "Checking..." : "Run Check"}
+                        </Button>
+                      </Stack>
+                    ) : (
                       <Button
                         variant="contained"
+                        size="large"
+                        fullWidth
                         onClick={handleCheckGate}
-                        disabled={checkBusy || !isWalletConnected || !connection}
-                        startIcon={
-                          checkBusy ? <CircularProgress size={16} color="inherit" /> : <ShieldRoundedIcon />
+                        disabled={
+                          checkBusy ||
+                          checkDeriveBusy ||
+                          !isWalletConnected ||
+                          !connection ||
+                          !checkForm.gateId ||
+                          !checkForm.user
                         }
+                        startIcon={
+                          checkBusy ? <CircularProgress size={18} color="inherit" /> : <ShieldRoundedIcon />
+                        }
+                        sx={{ py: 1.25, fontSize: "1.02rem", fontWeight: 700 }}
                       >
-                        {checkBusy ? "Checking..." : "Run Check"}
+                        {checkBusy ? "Checking Access..." : "Check Access"}
                       </Button>
-                    </Stack>
+                    )}
                   </Stack>
                 </Grid>
                 <Grid size={{ xs: 12, md: 5 }}>
@@ -3174,7 +3992,17 @@ export default function Page() {
                       className="mono"
                       sx={{ m: 0, fontSize: "0.78rem", color: "text.primary" }}
                     >
-                      {JSON.stringify(checkPreview, null, 2)}
+                      {JSON.stringify(
+                        isAdvancedCheckMode
+                          ? checkPreview
+                          : {
+                              gateId: checkForm.gateId,
+                              user: checkForm.user,
+                              storeRecord: checkForm.storeRecord
+                            },
+                        null,
+                        2
+                      )}
                     </Typography>
                   </Paper>
                 </Grid>
@@ -3362,6 +4190,13 @@ export default function Page() {
                       </Button>
                       <Button
                         variant="outlined"
+                        onClick={handleLoadSelectedGateIntoEditor}
+                        disabled={adminBusy !== "" || !adminForm.selectedGateId}
+                      >
+                        {adminBusy === "loadEditor" ? "Loading Editor..." : "Load Into Editor"}
+                      </Button>
+                      <Button
+                        variant="outlined"
                         onClick={handleUpdateGateCriteria}
                         disabled={
                           adminBusy !== "" ||
@@ -3375,6 +4210,9 @@ export default function Page() {
                           : "Update Criteria (from Create form)"}
                       </Button>
                     </Stack>
+                    <Typography variant="caption" color="text.secondary">
+                      Use "Load Into Editor" to prefill Gate Builder fields, then update criteria from this panel.
+                    </Typography>
 
                     <Paper variant="outlined" sx={{ p: 2 }}>
                       <Stack spacing={2}>

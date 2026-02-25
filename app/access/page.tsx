@@ -1771,6 +1771,25 @@ export default function AccessPage() {
     return url.toString();
   };
 
+  const buildAdminConsoleLink = (gateIdRaw: string) => {
+    const gateId = gateIdRaw.trim();
+    if (!gateId) {
+      return "";
+    }
+    const normalizedGateId = parsePublicKey("Gate ID", gateId, true)!.toBase58();
+    if (typeof window === "undefined") {
+      return "";
+    }
+    const url = new URL(window.location.origin + "/");
+    url.searchParams.set("tab", "admin");
+    url.searchParams.set("adminGate", normalizedGateId);
+    url.searchParams.set("cluster", cluster);
+    if (cluster === "custom" && customRpc.trim()) {
+      url.searchParams.set("rpc", customRpc.trim());
+    }
+    return url.toString();
+  };
+
   const copyShareLink = async () => {
     try {
       const link = buildShareLink(memberForm.gateId);
@@ -1781,6 +1800,18 @@ export default function AccessPage() {
       notify("Share link copied.", "success");
     } catch (error) {
       notify(error instanceof Error ? error.message : "Failed to copy share link.", "error");
+    }
+  };
+
+  const openAdminConsole = () => {
+    try {
+      const link = buildAdminConsoleLink(memberForm.gateId);
+      if (!link) {
+        throw new Error("Gate ID is required before opening admin console.");
+      }
+      window.location.assign(link);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Failed to open admin console.", "error");
     }
   };
 
@@ -3196,6 +3227,13 @@ export default function AccessPage() {
               disabled={gateLoadBusy || !memberForm.gateId || !connection}
             >
               {gateLoadBusy ? "Loading Gate..." : "Load Gate"}
+            </Button>
+            <Button
+              variant="outlined"
+              onClick={openAdminConsole}
+              disabled={!memberForm.gateId}
+            >
+              Manage Gate (Admin)
             </Button>
             {lastRpcProbeSlot !== null && (
               <Typography sx={{ alignSelf: "center", color: "text.secondary", fontSize: "0.84rem" }}>
