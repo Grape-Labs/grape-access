@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
 import ErrorOutlineRoundedIcon from "@mui/icons-material/ErrorOutlineRounded";
+import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import ShieldRoundedIcon from "@mui/icons-material/ShieldRounded";
 import {
   Alert,
@@ -11,9 +12,14 @@ import {
   Button,
   CircularProgress,
   Container,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Divider,
   FormControl,
   FormControlLabel,
+  IconButton,
   InputLabel,
   MenuItem,
   Paper,
@@ -29,7 +35,7 @@ import {
 } from "@mui/material";
 import { AnchorProvider, BorshAccountsCoder } from "@coral-xyz/anchor";
 import { useWallet } from "@solana/wallet-adapter-react";
-import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
+import { BaseWalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import {
   Connection,
   Keypair,
@@ -205,6 +211,15 @@ const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
 const SHYFT_MAINNET_RPC =
   process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC?.trim() || "https://api.mainnet-beta.solana.com";
 const DEFAULT_CLUSTER: ClusterKind = "mainnet-beta";
+const ACCESS_WALLET_BUTTON_LABELS = {
+  "change-wallet": "Change wallet",
+  connecting: "Connecting ...",
+  "copy-address": "Copy address",
+  copied: "Copied",
+  disconnect: "Disconnect",
+  "has-wallet": "Connect",
+  "no-wallet": "Connect"
+} as const;
 
 const defaultMemberForm: MemberFormState = {
   gateId: "",
@@ -988,6 +1003,21 @@ function endpointForCluster(cluster: ClusterKind, customRpc: string) {
     return "https://api.testnet.solana.com";
   }
   return "https://api.devnet.solana.com";
+}
+
+function summarizeEndpointForDisplay(endpoint: string) {
+  const trimmed = endpoint.trim();
+  if (!trimmed) {
+    return "(not configured)";
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const host = parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname;
+    return `${parsed.protocol}//${host}`;
+  } catch {
+    const urlMatch = trimmed.match(/https?:\/\/[^\s/]+/i);
+    return urlMatch?.[0] || trimmed;
+  }
 }
 
 async function validateProgramOwnedAccount({
@@ -1814,6 +1844,7 @@ export default function AccessPage() {
 
   const [cluster, setCluster] = useState<ClusterKind>(DEFAULT_CLUSTER);
   const [customRpc, setCustomRpc] = useState("");
+  const [networkSettingsOpen, setNetworkSettingsOpen] = useState(false);
   const [accessViewMode, setAccessViewMode] = useState<AccessViewMode>("simple");
   const autoDeriveKeyRef = useRef("");
 
@@ -1928,6 +1959,22 @@ export default function AccessPage() {
   }, [customRpc]);
 
   const rpcEndpoint = useMemo(() => endpointForCluster(cluster, customRpc) ?? "", [cluster, customRpc]);
+  const rpcEndpointDisplay = useMemo(
+    () => summarizeEndpointForDisplay(rpcEndpoint),
+    [rpcEndpoint]
+  );
+  const networkLabel = useMemo(() => {
+    if (cluster === "mainnet-beta") {
+      return "Mainnet Beta";
+    }
+    if (cluster === "devnet") {
+      return "Devnet";
+    }
+    if (cluster === "testnet") {
+      return "Testnet";
+    }
+    return "Custom RPC";
+  }, [cluster]);
 
   const connection = useMemo(() => {
     if (!rpcEndpoint) {
@@ -3413,7 +3460,8 @@ export default function AccessPage() {
               p: 2,
               borderRadius: 2,
               position: "relative",
-              overflow: "hidden",
+              zIndex: 20,
+              overflow: "visible",
               isolation: "isolate",
               backgroundColor: "rgba(7,12,22,0.92)",
               backgroundImage: gateContext.profile.bannerUrl
@@ -3427,6 +3475,7 @@ export default function AccessPage() {
                 position: "absolute",
                 inset: 0,
                 zIndex: 0,
+                borderRadius: "inherit",
                 background: gateContext.profile.bannerUrl
                   ? "linear-gradient(120deg, rgba(8,12,20,0.78) 0%, rgba(8,12,20,0.62) 55%, rgba(8,12,20,0.7) 100%)"
                   : "linear-gradient(120deg, rgba(8,12,20,0.66) 0%, rgba(8,12,20,0.5) 100%)"
@@ -3436,6 +3485,7 @@ export default function AccessPage() {
                 position: "absolute",
                 inset: 0,
                 zIndex: 0,
+                borderRadius: "inherit",
                 pointerEvents: "none",
                 background: `radial-gradient(120% 100% at 0% 0%, ${gateContext.profile.accent}33 0%, transparent 58%)`
               }
@@ -3539,7 +3589,22 @@ export default function AccessPage() {
                       {gateContext.profile.supportLabel || "Community Support"}
                     </Button>
                   )}
-                  <WalletMultiButton />
+                  <Stack direction="row" spacing={0.8} alignItems="center">
+                    <IconButton
+                      onClick={() => setNetworkSettingsOpen(true)}
+                      aria-label="Open network settings"
+                      sx={{
+                        border: "1px solid",
+                        borderColor: "rgba(109, 184, 255, 0.34)",
+                        color: "rgba(228, 238, 255, 0.9)",
+                        width: 34,
+                        height: 34
+                      }}
+                    >
+                      <SettingsRoundedIcon fontSize="small" />
+                    </IconButton>
+                    <BaseWalletMultiButton labels={ACCESS_WALLET_BUTTON_LABELS} />
+                  </Stack>
                 </Stack>
               </Stack>
               <Box sx={{ mt: 0.5 }}>
@@ -3580,37 +3645,12 @@ export default function AccessPage() {
             <Alert severity="info">Connect your wallet, then run your access check.</Alert>
           )}
 
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
-            <FormControl fullWidth>
-              <InputLabel>Network</InputLabel>
-              <Select
-                label="Network"
-                value={cluster}
-                onChange={(event) => setCluster(event.target.value as ClusterKind)}
-              >
-                <MenuItem value="mainnet-beta">Mainnet Beta</MenuItem>
-                <MenuItem value="devnet">Devnet</MenuItem>
-                <MenuItem value="testnet">Testnet</MenuItem>
-                <MenuItem value="custom">Custom RPC</MenuItem>
-              </Select>
-            </FormControl>
-            {cluster === "custom" && (
-              <TextField
-                fullWidth
-                label="Custom RPC URL"
-                value={customRpc}
-                onChange={(event) => setCustomRpc(event.target.value)}
-                placeholder="https://..."
-              />
-            )}
-          </Stack>
-
           <TextField
             fullWidth
             label="Gate ID"
             value={memberForm.gateId}
             onChange={(event) => setMemberGateId(event.target.value)}
-            helperText="Gate ID identifier (not the gate PDA account address)."
+            helperText={`Gate ID identifier (not the gate PDA account address). Network: ${networkLabel}.`}
           />
           {derivedGatePda && (
             <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mt: -0.6 }}>
@@ -3953,15 +3993,6 @@ export default function AccessPage() {
             </Paper>
           )}
 
-          {memberCheck.signature && (
-            <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
-              <Button href={explorerLink(memberCheck.signature, rpcEndpoint)} target="_blank" rel="noreferrer">
-                View Transaction
-              </Button>
-              <Button onClick={() => void copyText(memberCheck.signature ?? "")}>Copy Signature</Button>
-            </Stack>
-          )}
-
           {isAdvancedMode && (
             <Paper
               variant="outlined"
@@ -4000,6 +4031,47 @@ export default function AccessPage() {
           </Box>
         </Stack>
       </Paper>
+
+      <Dialog
+        open={networkSettingsOpen}
+        onClose={() => setNetworkSettingsOpen(false)}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>Network Settings</DialogTitle>
+        <DialogContent>
+          <Stack spacing={1.4} sx={{ mt: 0.6 }}>
+            <FormControl fullWidth>
+              <InputLabel>Network</InputLabel>
+              <Select
+                label="Network"
+                value={cluster}
+                onChange={(event) => setCluster(event.target.value as ClusterKind)}
+              >
+                <MenuItem value="mainnet-beta">Mainnet Beta</MenuItem>
+                <MenuItem value="devnet">Devnet</MenuItem>
+                <MenuItem value="testnet">Testnet</MenuItem>
+                <MenuItem value="custom">Custom RPC</MenuItem>
+              </Select>
+            </FormControl>
+            {cluster === "custom" && (
+              <TextField
+                fullWidth
+                label="Custom RPC URL"
+                value={customRpc}
+                onChange={(event) => setCustomRpc(event.target.value)}
+                placeholder="https://..."
+              />
+            )}
+            <Typography variant="caption" color="text.secondary" className="mono">
+              Active endpoint: {rpcEndpointDisplay}
+            </Typography>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setNetworkSettingsOpen(false)}>Done</Button>
+        </DialogActions>
+      </Dialog>
 
       <Snackbar
         open={snackbarOpen}
