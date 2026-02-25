@@ -97,7 +97,11 @@ interface CommunityProfile {
   name: string;
   subtitle: string;
   accent: string;
+  description: string;
+  logoUrl: string;
+  bannerUrl: string;
   supportLabel: string;
+  supportUrl: string;
   passActions: CommunityAction[];
   failActions: CommunityAction[];
 }
@@ -138,7 +142,12 @@ const DEFAULT_COMMUNITY_PROFILE: CommunityProfile = {
   name: "Grape Community Access",
   subtitle: "Community-verified access powered by on-chain gate checks.",
   accent: "#6db8ff",
+  description:
+    "Connect your wallet and run an on-chain check to verify your eligibility for this community.",
+  logoUrl: "",
+  bannerUrl: "",
   supportLabel: "Need help? Contact your community moderators.",
+  supportUrl: "",
   passActions: [
     { label: "Open Community Hub", href: "https://grape.network" }
   ],
@@ -1538,7 +1547,7 @@ async function discoverGateCluster(
 function resolveMetadataHttpUri(uri: string) {
   const trimmed = uri.trim();
   if (trimmed.startsWith("irys://")) {
-    return `https://gateway.irys.xyz/${trimmed.slice("irys://".length)}`;
+    return `https://uploader.irys.xyz/${trimmed.slice("irys://".length)}`;
   }
   if (trimmed.startsWith("ipfs://")) {
     return `https://ipfs.io/ipfs/${trimmed.slice("ipfs://".length)}`;
@@ -1554,9 +1563,17 @@ function resolveCommunityProfile(
   metadataProfileOverrides?: Partial<CommunityProfile>
 ): CommunityProfile {
   const base = gateId ? COMMUNITY_PROFILES_BY_GATE[gateId] ?? DEFAULT_COMMUNITY_PROFILE : DEFAULT_COMMUNITY_PROFILE;
+  const merged = { ...base } as CommunityProfile;
+  if (metadataProfileOverrides) {
+    for (const key of Object.keys(metadataProfileOverrides) as Array<keyof CommunityProfile>) {
+      const value = metadataProfileOverrides[key];
+      if (value !== undefined) {
+        (merged as unknown as Record<string, unknown>)[key] = value as unknown;
+      }
+    }
+  }
   return {
-    ...base,
-    ...metadataProfileOverrides,
+    ...merged,
     passActions:
       metadataProfileOverrides?.passActions && metadataProfileOverrides.passActions.length > 0
         ? metadataProfileOverrides.passActions
@@ -1609,6 +1626,12 @@ function parseCommunityProfileFromMetadata(raw: unknown): Partial<CommunityProfi
       })
       .filter((entry): entry is CommunityAction => Boolean(entry));
   };
+  const parseManifestUri = (input: unknown): string => {
+    if (typeof input !== "string") {
+      return "";
+    }
+    return resolveMetadataHttpUri(input).trim();
+  };
 
   const passActions = parseActions(metadata.passActions);
   const failActions = parseActions(metadata.failActions);
@@ -1658,7 +1681,14 @@ function parseCommunityProfileFromMetadata(raw: unknown): Partial<CommunityProfi
         : typeof branding.accent === "string" && branding.accent.trim()
           ? branding.accent.trim()
           : undefined,
+    description:
+      typeof branding.description === "string" && branding.description.trim()
+        ? branding.description.trim()
+        : undefined,
+    logoUrl: parseManifestUri(branding.logo) || undefined,
+    bannerUrl: parseManifestUri(branding.banner) || undefined,
     supportLabel: supportLabel || undefined,
+    supportUrl: resolveMetadataHttpUri(supportUrl) || undefined,
     passActions:
       passActions.length > 0
         ? passActions
@@ -3382,32 +3412,156 @@ export default function AccessPage() {
             sx={{
               p: 2,
               borderRadius: 2,
-              background: `linear-gradient(120deg, ${gateContext.profile.accent}33 0%, rgba(10,16,30,0.6) 60%)`,
-              border: `1px solid ${gateContext.profile.accent}66`
+              position: "relative",
+              overflow: "hidden",
+              isolation: "isolate",
+              backgroundColor: "rgba(7,12,22,0.92)",
+              backgroundImage: gateContext.profile.bannerUrl
+                ? `url(${gateContext.profile.bannerUrl})`
+                : `linear-gradient(120deg, ${gateContext.profile.accent}33 0%, rgba(10,16,30,0.6) 60%)`,
+              backgroundSize: "cover",
+              backgroundPosition: "center",
+              border: `1px solid ${gateContext.profile.accent}66`,
+              "&::before": {
+                content: '""',
+                position: "absolute",
+                inset: 0,
+                zIndex: 0,
+                background: gateContext.profile.bannerUrl
+                  ? "linear-gradient(120deg, rgba(8,12,20,0.78) 0%, rgba(8,12,20,0.62) 55%, rgba(8,12,20,0.7) 100%)"
+                  : "linear-gradient(120deg, rgba(8,12,20,0.66) 0%, rgba(8,12,20,0.5) 100%)"
+              },
+              "&::after": {
+                content: '""',
+                position: "absolute",
+                inset: 0,
+                zIndex: 0,
+                pointerEvents: "none",
+                background: `radial-gradient(120% 100% at 0% 0%, ${gateContext.profile.accent}33 0%, transparent 58%)`
+              }
             }}
           >
-            <Stack
-              direction={{ xs: "column", md: "row" }}
-              spacing={1.5}
-              justifyContent="space-between"
-              alignItems={{ xs: "flex-start", md: "center" }}
+            <Box
+              sx={{
+                position: "relative",
+                zIndex: 1,
+                p: { xs: 1.2, md: 1.4 },
+                borderRadius: 1.6,
+                backgroundColor: "rgba(7,12,22,0.62)",
+                border: "1px solid rgba(255,255,255,0.14)",
+                boxShadow: "0 10px 24px rgba(0,0,0,0.22)",
+                backdropFilter: "blur(4px)"
+              }}
             >
-              <Box>
-                <Typography variant="h5">{gateContext.profile.name}</Typography>
-                <Typography color="text.secondary">{gateContext.profile.subtitle}</Typography>
+              <Stack
+                direction={{ xs: "column", md: "row" }}
+                spacing={1.5}
+                justifyContent="space-between"
+                alignItems={{ xs: "flex-start", md: "center" }}
+              >
+                <Stack
+                  direction={{ xs: "column", sm: "row" }}
+                  spacing={1.4}
+                  alignItems={{ xs: "flex-start", sm: "center" }}
+                >
+                  {gateContext.profile.logoUrl && (
+                    <Box
+                      component="img"
+                      src={gateContext.profile.logoUrl}
+                      alt={`${gateContext.profile.name} logo`}
+                      sx={{
+                        width: 56,
+                        height: 56,
+                        borderRadius: 1.6,
+                        objectFit: "cover",
+                        border: "1px solid rgba(255,255,255,0.28)",
+                        boxShadow: "0 6px 18px rgba(0,0,0,0.28)"
+                      }}
+                    />
+                  )}
+                  <Box>
+                    <Typography
+                      variant="h5"
+                      sx={{ color: "rgba(247, 250, 255, 0.98)", textShadow: "0 1px 2px rgba(0,0,0,0.45)" }}
+                    >
+                      {gateContext.profile.name}
+                    </Typography>
+                    <Typography sx={{ color: "rgba(230, 238, 252, 0.92)", textShadow: "0 1px 2px rgba(0,0,0,0.32)" }}>
+                      {gateContext.profile.subtitle}
+                    </Typography>
+                    {gateContext.profile.description && (
+                      <Typography
+                        sx={{
+                          mt: 0.7,
+                          fontSize: "0.9rem",
+                          color: "rgba(226, 236, 252, 0.92)",
+                          maxWidth: 760,
+                          textShadow: "0 1px 2px rgba(0,0,0,0.3)"
+                        }}
+                      >
+                        {gateContext.profile.description}
+                      </Typography>
+                    )}
+                    <Stack direction="row" spacing={1.2} alignItems="center" sx={{ mt: 0.8 }}>
+                      <Box
+                        sx={{
+                          width: 11,
+                          height: 11,
+                          borderRadius: "50%",
+                          backgroundColor: gateContext.profile.accent,
+                          border: "1px solid rgba(255,255,255,0.35)"
+                        }}
+                      />
+                      <Typography sx={{ fontSize: "0.8rem", color: "rgba(230, 238, 252, 0.9)" }}>
+                        Theme accent: <span className="mono">{gateContext.profile.accent}</span>
+                      </Typography>
+                    </Stack>
+                  </Box>
+                </Stack>
+                <Stack
+                  direction={{ xs: "column", sm: "row" }}
+                  spacing={1}
+                  alignItems={{ xs: "stretch", sm: "center" }}
+                >
+                  {gateContext.profile.supportUrl && (
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      href={gateContext.profile.supportUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      sx={{
+                        borderColor: "rgba(240,246,255,0.4)",
+                        color: "rgba(247,250,255,0.96)",
+                        backgroundColor: "rgba(8,12,20,0.32)"
+                      }}
+                    >
+                      {gateContext.profile.supportLabel || "Community Support"}
+                    </Button>
+                  )}
+                  <WalletMultiButton />
+                </Stack>
+              </Stack>
+              <Box sx={{ mt: 0.5 }}>
                 {gateContext.gateTypeLabel && (
-                  <Typography sx={{ mt: 0.7, fontSize: "0.85rem", color: "text.secondary" }}>
+                  <Typography sx={{ mt: 0.7, fontSize: "0.85rem", color: "rgba(226, 236, 252, 0.9)" }}>
                     Gate Type: {gateContext.gateTypeLabel}
                   </Typography>
                 )}
                 {gateContext.metadataUri && (
-                  <Typography sx={{ mt: 0.4, fontSize: "0.8rem", color: "text.secondary" }}>
+                  <Typography
+                    sx={{
+                      mt: 0.4,
+                      fontSize: "0.8rem",
+                      color: "rgba(220, 232, 251, 0.86)",
+                      wordBreak: "break-all"
+                    }}
+                  >
                     Metadata URI: <span className="mono">{gateContext.metadataUri}</span>
                   </Typography>
                 )}
               </Box>
-              <WalletMultiButton />
-            </Stack>
+            </Box>
           </Box>
 
           <Stepper activeStep={progressStep} alternativeLabel>
@@ -3759,7 +3913,9 @@ export default function AccessPage() {
                       ? "You are close."
                       : "Action needed."}
                 </Typography>
-                <Typography color="text.secondary">{gateContext.profile.supportLabel}</Typography>
+                {gateContext.profile.supportLabel && (
+                  <Typography color="text.secondary">{gateContext.profile.supportLabel}</Typography>
+                )}
                 <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
                   {ctaActions.map((action) => (
                     <Button
@@ -3772,6 +3928,16 @@ export default function AccessPage() {
                       {action.label}
                     </Button>
                   ))}
+                  {gateContext.profile.supportUrl && (
+                    <Button
+                      href={gateContext.profile.supportUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      variant="outlined"
+                    >
+                      Community Support
+                    </Button>
+                  )}
                   {memberCheck.signature && (
                     <Button
                       href={explorerLink(memberCheck.signature, rpcEndpoint)}

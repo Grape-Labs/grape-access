@@ -40,6 +40,24 @@ function sanitizeTagValue(value: string) {
   return value.replace(/[^\x20-\x7e]/g, "").slice(0, 256);
 }
 
+function resolvePublicIrysBaseUrl() {
+  const configured =
+    process.env.IRYS_GATEWAY_URL?.trim() ||
+    process.env.IRYS_PUBLIC_URL?.trim() ||
+    process.env.IRYS_GATEWAY_BASE_URL?.trim() ||
+    "https://uploader.irys.xyz";
+  const normalized = configured.replace(/\/$/, "");
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.hostname === "gateway.irys.xyz") {
+      return "https://uploader.irys.xyz";
+    }
+  } catch {
+    // Ignore malformed URL and use normalized fallback below.
+  }
+  return normalized;
+}
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as UploadRequestBody;
@@ -108,19 +126,15 @@ export async function POST(request: Request) {
     }
 
     const receipt = await irys.upload(payloadString, { tags });
-    const gatewayBase = (process.env.IRYS_GATEWAY_BASE_URL || "https://gateway.irys.xyz").replace(
-      /\/$/,
-      ""
-    );
-    const gatewayUrl = receipt.public || `${gatewayBase}/${receipt.id}`;
-    const irysUri = `irys://${receipt.id}`;
+    const publicBaseUrl = resolvePublicIrysBaseUrl();
+    const uploaderUrl = `${publicBaseUrl}/${receipt.id}`;
 
     return NextResponse.json({
       ok: true,
       id: receipt.id,
-      uri: gatewayUrl,
-      irysUri,
-      gatewayUrl,
+      uri: uploaderUrl,
+      uploaderUrl,
+      gatewayUrl: receipt.public || null,
       network
     });
   } catch (error) {

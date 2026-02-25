@@ -1271,18 +1271,28 @@ function resolveMetadataHttpUri(uri: string) {
   }
   if (trimmed.startsWith("irys://")) {
     const id = trimmed.slice("irys://".length).trim();
-    return id ? `https://gateway.irys.xyz/${id}` : "";
+    return id ? `https://uploader.irys.xyz/${id}` : "";
   }
   return trimmed;
 }
 
-function pickPreferredIrysUri(input: { irysUri?: string; uri?: string }) {
-  const irysUri = typeof input.irysUri === "string" ? input.irysUri.trim() : "";
-  if (irysUri) {
-    return irysUri;
+function pickPreferredIrysUri(input: {
+  uri?: string;
+  uploaderUrl?: string;
+  gatewayUrl?: string;
+  irysUri?: string;
+}) {
+  const candidates = [input.uri, input.uploaderUrl, input.gatewayUrl, input.irysUri];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") {
+      continue;
+    }
+    const normalized = resolveMetadataHttpUri(candidate);
+    if (normalized) {
+      return normalized;
+    }
   }
-  const uri = typeof input.uri === "string" ? input.uri.trim() : "";
-  return uri;
+  return "";
 }
 
 function extractSignature(result: unknown) {
@@ -2726,12 +2736,14 @@ export default function Page() {
 
       const body = (await response.json().catch(() => ({}))) as {
         uri?: string;
+        uploaderUrl?: string;
+        gatewayUrl?: string;
         irysUri?: string;
         id?: string;
         error?: string;
       };
 
-      if (!response.ok || (!body.uri && !body.irysUri)) {
+      if (!response.ok || !pickPreferredIrysUri(body)) {
         throw new Error(body.error || "Failed to upload metadata JSON to Irys.");
       }
 
@@ -2779,11 +2791,13 @@ export default function Page() {
 
       const body = (await response.json().catch(() => ({}))) as {
         uri?: string;
+        uploaderUrl?: string;
+        gatewayUrl?: string;
         irysUri?: string;
         id?: string;
         error?: string;
       };
-      if (!response.ok || (!body.uri && !body.irysUri)) {
+      if (!response.ok || !pickPreferredIrysUri(body)) {
         throw new Error(body.error || "Failed to upload file to Irys.");
       }
       const preferredUri = pickPreferredIrysUri(body);
@@ -4274,11 +4288,11 @@ export default function Page() {
                           value={createForm.metadataUri}
                           onChange={(event) => updateCreateForm("metadataUri", event.target.value)}
                           disabled={isEditMode}
-                          placeholder="https://gateway.irys.xyz/<id>"
+                          placeholder="https://uploader.irys.xyz/<id>"
                           helperText={
                             isEditMode
                               ? "Edit mode updates criteria only. Use Admin Console for metadata URI updates."
-                              : "Saved on-chain during initialize access. Supports irys:// and https:// URIs."
+                              : "Saved on-chain during initialize access. Use full HTTPS metadata URLs."
                           }
                         />
                         <Grid container spacing={1.2}>
