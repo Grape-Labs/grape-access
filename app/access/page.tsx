@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
 import ErrorOutlineRoundedIcon from "@mui/icons-material/ErrorOutlineRounded";
@@ -220,6 +220,19 @@ const ACCESS_WALLET_BUTTON_LABELS = {
   "has-wallet": "Connect",
   "no-wallet": "Connect"
 } as const;
+const ACCESS_SUCCESS_SPARKS = [
+  { x: 8, tx: -34, ty: -112, delay: 10, color: "#7df6d1" },
+  { x: 16, tx: -12, ty: -126, delay: 55, color: "#6db8ff" },
+  { x: 24, tx: 16, ty: -104, delay: 90, color: "#9be7ff" },
+  { x: 33, tx: -24, ty: -132, delay: 120, color: "#7df6d1" },
+  { x: 42, tx: 20, ty: -116, delay: 150, color: "#6db8ff" },
+  { x: 50, tx: -6, ty: -138, delay: 185, color: "#c5f9ea" },
+  { x: 58, tx: 24, ty: -122, delay: 220, color: "#7fd0ff" },
+  { x: 67, tx: -26, ty: -128, delay: 250, color: "#7df6d1" },
+  { x: 75, tx: 12, ty: -110, delay: 285, color: "#6db8ff" },
+  { x: 84, tx: -18, ty: -118, delay: 320, color: "#9be7ff" },
+  { x: 92, tx: 32, ty: -106, delay: 355, color: "#7df6d1" }
+] as const;
 
 const defaultMemberForm: MemberFormState = {
   gateId: "",
@@ -1876,6 +1889,9 @@ export default function AccessPage() {
   const [identityDebugBusy, setIdentityDebugBusy] = useState(false);
   const [lastRpcProbeSlot, setLastRpcProbeSlot] = useState<number | null>(null);
   const [derivedGatePda, setDerivedGatePda] = useState("");
+  const [successCelebrationActive, setSuccessCelebrationActive] = useState(false);
+  const [successCelebrationNonce, setSuccessCelebrationNonce] = useState(0);
+  const successCelebrationKeyRef = useRef("");
 
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [snackbarMessage, setSnackbarMessage] = useState("");
@@ -2015,6 +2031,21 @@ export default function AccessPage() {
     return 2;
   }, [isWalletConnected, gateContext.status]);
   const isAdvancedMode = accessViewMode === "advanced";
+
+  useEffect(() => {
+    if (memberCheck.status !== "success" || memberCheck.passed !== true) {
+      return;
+    }
+    const celebrationKey = `${memberCheck.signature ?? ""}|${memberCheck.message}`;
+    if (successCelebrationKeyRef.current === celebrationKey) {
+      return;
+    }
+    successCelebrationKeyRef.current = celebrationKey;
+    setSuccessCelebrationNonce((prev) => prev + 1);
+    setSuccessCelebrationActive(true);
+    const timer = window.setTimeout(() => setSuccessCelebrationActive(false), 1900);
+    return () => window.clearTimeout(timer);
+  }, [memberCheck.status, memberCheck.passed, memberCheck.signature, memberCheck.message]);
 
   const notify = (message: string, severity: "success" | "error" | "info") => {
     setSnackbarMessage(message);
@@ -3931,6 +3962,8 @@ export default function AccessPage() {
               variant="outlined"
               sx={{
                 p: 2,
+                position: "relative",
+                overflow: "hidden",
                 borderColor:
                   memberCheck.passed === true
                     ? "rgba(61, 215, 164, 0.4)"
@@ -3942,9 +3975,34 @@ export default function AccessPage() {
                     ? "rgba(34, 177, 131, 0.12)"
                     : memberCheck.passed === false
                       ? "rgba(255, 167, 38, 0.12)"
-                      : "rgba(244, 67, 54, 0.12)"
+                      : "rgba(244, 67, 54, 0.12)",
+                boxShadow:
+                  memberCheck.passed === true && successCelebrationActive
+                    ? "0 0 0 1px rgba(125, 246, 209, 0.22), 0 0 28px rgba(109, 184, 255, 0.24)"
+                    : undefined
               }}
             >
+              {memberCheck.passed === true && successCelebrationActive && (
+                <Box key={successCelebrationNonce} className="access-wow-overlay">
+                  <Box className="access-wow-glow" />
+                  <Box className="access-wow-ring" />
+                  {ACCESS_SUCCESS_SPARKS.map((spark, index) => (
+                    <Box
+                      key={`${successCelebrationNonce}-${index}`}
+                      className="access-wow-spark"
+                      style={
+                        {
+                          "--sx": `${spark.x}%`,
+                          "--tx": `${spark.tx}px`,
+                          "--ty": `${spark.ty}px`,
+                          "--sd": `${spark.delay}ms`,
+                          "--sc": spark.color
+                        } as CSSProperties
+                      }
+                    />
+                  ))}
+                </Box>
+              )}
               <Stack spacing={1.2}>
                 <Typography variant="subtitle1">
                   {memberCheck.passed === true

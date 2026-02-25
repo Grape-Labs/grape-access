@@ -3599,6 +3599,16 @@ export default function Page() {
   } = {}) => {
     const gateId = parsePublicKey("Selected gate", gateIdInput ?? adminForm.selectedGateId, true)!;
     const gateIdBase58 = gateId.toBase58();
+    const [accessPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("access"), gateId.toBuffer()],
+      GPASS_PROGRAM_ID
+    );
+    const [legacyGatePda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("gate"), gateId.toBuffer()],
+      GPASS_PROGRAM_ID
+    );
+    const recordOwnerCandidates = [accessPda.toBase58(), legacyGatePda.toBase58(), gateIdBase58];
+    const recordOwnerCandidateSet = new Set(recordOwnerCandidates);
     const client = await getAdminClient({ readOnly: true });
     const clientAny = client as Record<string, any>;
     const checkRecordAccountClient =
@@ -3614,12 +3624,29 @@ export default function Page() {
 
     if (typeof allMethod === "function") {
       try {
-        const fetched = await allMethod.call(checkRecordAccountClient, [
-          { memcmp: { offset: 9, bytes: gateIdBase58 } }
-        ]);
-        for (const entry of Array.isArray(fetched) ? fetched : []) {
+        const fetchedByPda = new Map<string, any>();
+        for (const candidate of recordOwnerCandidates) {
+          const fetched = await allMethod.call(checkRecordAccountClient, [
+            { memcmp: { offset: 9, bytes: candidate } }
+          ]);
+          for (const entry of Array.isArray(fetched) ? fetched : []) {
+            const pda =
+              (entry as any)?.publicKey && typeof (entry as any).publicKey.toBase58 === "function"
+                ? (entry as any).publicKey.toBase58()
+                : "";
+            if (pda && !fetchedByPda.has(pda)) {
+              fetchedByPda.set(pda, entry);
+            }
+          }
+        }
+
+        for (const entry of fetchedByPda.values()) {
           const account = (entry as any)?.account as Record<string, unknown> | undefined;
           if (!account) {
+            continue;
+          }
+          const recordOwner = toPubkeyString(account.access ?? account.gate);
+          if (recordOwner && !recordOwnerCandidateSet.has(recordOwner)) {
             continue;
           }
           const user = toPubkeyString(account.user);
@@ -3646,14 +3673,24 @@ export default function Page() {
     }
 
     if (records.length === 0 && connection) {
-      const rawMatches = await connection.getProgramAccounts(GPASS_PROGRAM_ID, {
-        filters: [{ memcmp: { offset: 9, bytes: gateIdBase58 } }]
-      });
+      const rawMatchesByPda = new Map<string, { pubkey: PublicKey; account: { data: Buffer } }>();
+      for (const candidate of recordOwnerCandidates) {
+        const rawMatches = await connection.getProgramAccounts(GPASS_PROGRAM_ID, {
+          filters: [{ memcmp: { offset: 9, bytes: candidate } }]
+        });
+        for (const entry of rawMatches) {
+          const pda = entry.pubkey.toBase58();
+          if (!rawMatchesByPda.has(pda)) {
+            rawMatchesByPda.set(pda, entry as { pubkey: PublicKey; account: { data: Buffer } });
+          }
+        }
+      }
+      const rawMatches = Array.from(rawMatchesByPda.values());
       for (const entry of rawMatches) {
         const decoded = decodeCheckRecordLikeAccountData(entry.account.data);
         if (decoded) {
           const accountGate = toPubkeyString(decoded.gate ?? decoded.access);
-          if (accountGate && accountGate !== gateIdBase58) {
+          if (accountGate && !recordOwnerCandidateSet.has(accountGate)) {
             continue;
           }
           const user = toPubkeyString(decoded.user);
@@ -3673,7 +3710,7 @@ export default function Page() {
         }
 
         const rawParsed = readGateCheckRecordFromRawData(entry.account.data);
-        if (!rawParsed || !rawParsed.gate.equals(gateId)) {
+        if (!rawParsed || !recordOwnerCandidateSet.has(rawParsed.gate.toBase58())) {
           continue;
         }
         records.push({
@@ -3687,14 +3724,6 @@ export default function Page() {
     }
 
     if (records.length === 0 && connection) {
-      const [accessPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("access"), gateId.toBuffer()],
-        GPASS_PROGRAM_ID
-      );
-      const [legacyGatePda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("gate"), gateId.toBuffer()],
-        GPASS_PROGRAM_ID
-      );
       const signatureTargets = [accessPda, legacyGatePda];
       const signatureMap = new Map<
         string,
