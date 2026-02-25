@@ -1505,6 +1505,17 @@ function explorerLink(signature: string, cluster: ClusterKind) {
   return `${base}?cluster=${cluster}`;
 }
 
+function explorerAddressLink(address: string, cluster: ClusterKind) {
+  const base = `https://explorer.solana.com/address/${address}`;
+  if (cluster === "mainnet-beta") {
+    return base;
+  }
+  if (cluster === "custom") {
+    return `${base}?cluster=custom`;
+  }
+  return `${base}?cluster=${cluster}`;
+}
+
 function formatCheckedAt(checkedAt: number): string {
   if (!Number.isFinite(checkedAt) || checkedAt <= 0) {
     return "n/a";
@@ -6196,11 +6207,7 @@ export default function Page() {
                         ) : (
                           <Stack spacing={0.8}>
                             {adminGateUsers.map((entry) => (
-                              <Paper
-                                key={`${entry.pda}-${entry.user}`}
-                                variant="outlined"
-                                sx={{ p: 1, borderRadius: 1 }}
-                              >
+                              <Paper key={`${entry.pda}-${entry.user}`} variant="outlined" sx={{ p: 1, borderRadius: 1 }}>
                                 <Stack direction="row" justifyContent="space-between" spacing={1}>
                                   <Typography
                                     className="mono"
@@ -6215,15 +6222,48 @@ export default function Page() {
                                     {entry.passed ? "PASS" : "FAIL"}
                                   </Typography>
                                 </Stack>
-                                <Stack direction={{ xs: "column", sm: "row" }} spacing={0.8} sx={{ mt: 0.6 }}>
+                                <Stack
+                                  direction={{ xs: "column", sm: "row" }}
+                                  spacing={0.6}
+                                  sx={{ mt: 0.55 }}
+                                  alignItems={{ xs: "flex-start", sm: "center" }}
+                                >
                                   <Typography variant="caption" color="text.secondary">
                                     Checked: {entry.checkedAtLabel}
                                   </Typography>
                                   <Button
                                     size="small"
-                                    onClick={() => updateAdminForm("closeRecordUser", entry.user)}
+                                    href={
+                                      entry.pda.startsWith("tx:")
+                                        ? explorerLink(entry.pda.slice(3), cluster)
+                                        : explorerAddressLink(entry.pda, cluster)
+                                    }
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    sx={{
+                                      minWidth: 0,
+                                      px: 0.5,
+                                      py: 0,
+                                      lineHeight: 1.4,
+                                      fontSize: "0.72rem",
+                                      textTransform: "none"
+                                    }}
                                   >
-                                    Use for Close Record
+                                    Explorer
+                                  </Button>
+                                  <Button
+                                    size="small"
+                                    onClick={() => updateAdminForm("closeRecordUser", entry.user)}
+                                    sx={{
+                                      minWidth: 0,
+                                      px: 0.5,
+                                      py: 0,
+                                      lineHeight: 1.4,
+                                      fontSize: "0.72rem",
+                                      textTransform: "none"
+                                    }}
+                                  >
+                                    Use for close
                                   </Button>
                                 </Stack>
                               </Paper>
