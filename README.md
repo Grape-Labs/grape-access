@@ -3,14 +3,16 @@
 Grape Access Console is a Next.js + Material UI app for operating Grape Access gates on Solana with `@grapenpm/grape-access-sdk`.
 
 It includes:
-- A gate creation flow for admins
+- A gate/access creation flow for admins
 - A member self-serve portal
 - Admin lifecycle actions (load, inspect, activate/deactivate, transfer authority, close)
 - Moderator/debug check tools
+- Metadata URI + Irys metadata upload support
 
 ## What It Does Today
 
 - Create gates on-chain
+- Create access spaces with optional `metadataUri`
 - Check access on-chain for members or arbitrary wallets
 - Manage existing gates from authority wallets
 - Share deep links for member checks: `/access?gateId=<GATE_PUBLIC_KEY>&cluster=<mainnet-beta|devnet|testnet|custom>`
@@ -30,6 +32,7 @@ It includes:
 3. `Admin Console`
 - Load gates by authority (read-only supported)
 - Fetch gate details
+- Update metadata URI
 - Apply active state
 - Transfer authority
 - Close check record / close gate (with confirmation)
@@ -87,12 +90,33 @@ Optional:
   - Preferred mainnet RPC used when `Mainnet Beta` is selected in Connection Settings.
   - Optional override for the default Shyft mainnet RPC value.
 
+For Irys metadata upload API (`/api/irys/upload-json`):
+
+- `IRYS_SOLANA_PRIVATE_KEY`
+  - Server-side Solana secret key used by Irys uploader.
+  - Supports base58 string, JSON byte array (`[1,2,...]`), or comma-separated bytes.
+- `IRYS_NETWORK`
+  - Optional default: `mainnet` or `devnet`.
+- `IRYS_SOLANA_RPC_URL`
+  - Optional RPC endpoint used for Irys funding/upload wallet operations.
+- `IRYS_NODE_URL`
+  - Optional custom Irys node URL.
+- `IRYS_GATEWAY_BASE_URL`
+  - Optional gateway base used to construct returned URI when receipt has no `public` URL.
+
 Example `.env.local`:
 
 ```bash
 NEXT_PUBLIC_SHYFT_MAINNET_RPC=your_shyft_mainnet_rpc_url
 # Optional override:
 # NEXT_PUBLIC_WALLET_CONNECTOR_RPC=your_preferred_rpc_url
+
+# Irys uploader (server-side)
+# IRYS_SOLANA_PRIVATE_KEY=your_base58_or_json_secret_key
+# IRYS_NETWORK=mainnet
+# IRYS_SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+# IRYS_NODE_URL=https://uploader.irys.xyz
+# IRYS_GATEWAY_BASE_URL=https://gateway.irys.xyz
 ```
 
 ## Operator Quick Start
@@ -151,7 +175,7 @@ Gate criteria may require:
 Use the `/access` page `Auto-Derive Accounts` action first.
 
 ### SDK compatibility errors
-Console expects `@grapenpm/grape-access-sdk` exports compatible with current `GpassClient` method calls.
+Console now prefers access-first SDK methods (`GrapeAccessClient`, `initializeAccess`, `checkAccess`, etc.) and falls back to gate aliases for compatibility.
 
 ## Deploy (Vercel)
 
@@ -174,6 +198,7 @@ Console expects `@grapenpm/grape-access-sdk` exports compatible with current `Gp
 - `app/providers.tsx`: MUI + wallet providers
 - `app/layout.tsx`: App shell/fonts
 - `app/globals.css`: Global styles and wallet modal styling
+- `app/api/irys/upload-json/route.ts`: Server-side Irys JSON metadata uploader
 
 ## License
 

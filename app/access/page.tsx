@@ -27,7 +27,7 @@ import {
   TextField,
   Typography
 } from "@mui/material";
-import { AnchorProvider } from "@coral-xyz/anchor";
+import { AnchorProvider, BorshAccountsCoder } from "@coral-xyz/anchor";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import {
@@ -106,6 +106,7 @@ interface GateContextState {
   status: "idle" | "loading" | "ready" | "error";
   message: string;
   gateId?: string;
+  metadataUri?: string;
   criteriaVariant?: { type: string; config: Record<string, unknown> };
   gateTypeLabel?: string;
   profile: CommunityProfile;
@@ -181,10 +182,12 @@ const {
   GPASS_PROGRAM_ID,
   GRAPE_VERIFICATION_PROGRAM_ID,
   VINE_REPUTATION_PROGRAM_ID,
+  findAccessPda,
   findGatePda,
   findGrapeIdentityPda,
   findGrapeLinkPda
 } = GPassSdk;
+const findPrimaryAccessPda = (findAccessPda ?? findGatePda) as typeof findGatePda;
 
 const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
@@ -463,6 +466,39 @@ function extractVerificationSaltCandidates(spaceData: Uint8Array): Uint8Array[] 
     salts.push(Uint8Array.from(spaceData.subarray(107, 139)));
   }
   return uniqueByteArrays(salts);
+}
+
+function getAccessLikeAccountNamesFromIdl(): string[] {
+  const sdkAny = GPassSdk as Record<string, unknown>;
+  const idl = sdkAny.IDL as { accounts?: Array<{ name?: string }> } | undefined;
+  if (!idl?.accounts) {
+    return [];
+  }
+  return idl.accounts
+    .map((account) => account.name)
+    .filter((name): name is string => Boolean(name && /(access|gate)/i.test(name)));
+}
+
+function decodeAccessLikeAccountData(data: Buffer | Uint8Array): Record<string, unknown> | null {
+  const sdkAny = GPassSdk as Record<string, unknown>;
+  const idl = sdkAny.IDL;
+  if (!idl) {
+    return null;
+  }
+  try {
+    const coder = new BorshAccountsCoder(idl as any);
+    const bytes = Buffer.from(data);
+    const accountNames = getAccessLikeAccountNamesFromIdl();
+    for (const accountName of accountNames) {
+      const discriminator = BorshAccountsCoder.accountDiscriminator(accountName);
+      if (bytes.subarray(0, 8).equals(discriminator)) {
+        return coder.decodeUnchecked(accountName, bytes) as Record<string, unknown>;
+      }
+    }
+  } catch {
+    // Ignore decode failures and let caller continue with other fallbacks.
+  }
+  return null;
 }
 
 function identityBelongsToSpace(identityData: Uint8Array, grapeSpace: PublicKey) {
@@ -787,11 +823,13 @@ async function resolveSdkClient(
 ) {
   const readOnly = options?.readOnly ?? false;
   const sdkAny = GPassSdk as Record<string, unknown>;
-  const GpassClientCtor = sdkAny.GpassClient as (new (...args: unknown[]) => unknown) | undefined;
+  const AccessClientCtor =
+    (sdkAny.GrapeAccessClient as (new (...args: unknown[]) => unknown) | undefined) ??
+    (sdkAny.GpassClient as (new (...args: unknown[]) => unknown) | undefined);
 
-  if (typeof GpassClientCtor !== "function") {
+  if (typeof AccessClientCtor !== "function") {
     throw new Error(
-      "Installed SDK does not export GpassClient. Please update @grapenpm/grape-access-sdk."
+      "Installed SDK does not export GrapeAccessClient/GpassClient. Please update @grapenpm/grape-access-sdk."
     );
   }
 
@@ -815,7 +853,20 @@ async function resolveSdkClient(
     commitment: "confirmed"
   });
 
-  return new GpassClientCtor(provider, GPASS_PROGRAM_ID);
+  return new AccessClientCtor(provider, GPASS_PROGRAM_ID);
+}
+
+function getSdkClientMethod<T extends (...args: any[]) => any>(
+  client: Record<string, unknown>,
+  names: string[]
+): T | undefined {
+  for (const name of names) {
+    const candidate = client[name];
+    if (typeof candidate === "function") {
+      return candidate as T;
+    }
+  }
+  return undefined;
 }
 
 function extractSignature(result: unknown) {
@@ -1107,6 +1158,7 @@ async function validateCheckGateInputs(args: {
 }
 
 interface CheckGateInputParams {
+  accessId?: PublicKey;
   gateId: PublicKey;
   user: PublicKey;
   reputationAccount?: PublicKey;
@@ -1124,10 +1176,10 @@ async function runCheckGateBorshDiagnostics(args: {
   const { connection, client, params } = args;
   const diagnostics: string[] = [];
 
-  const buildInstruction = client.buildCheckGateInstruction as
-    | ((input: CheckGateInputParams) => Promise<TransactionInstruction>)
-    | undefined;
-  if (typeof buildInstruction !== "function") {
+  const buildInstruction = getSdkClientMethod<
+    ((input: CheckGateInputParams) => Promise<TransactionInstruction>)
+  >(client, ["buildCheckAccessInstruction", "buildCheckGateInstruction"]);
+  if (!buildInstruction) {
     return diagnostics;
   }
 
@@ -1252,13 +1304,17 @@ async function formatCheckGateError(error: unknown, connection: Connection | nul
 
 async function fetchGateWithCompatibility(
   client: Record<string, unknown>,
-  gateId: PublicKey
+  gateId: PublicKey,
+  connection?: Connection
 ): Promise<{ gate: Record<string, unknown> | null; gatePda: PublicKey; sdkError?: Error }> {
-  const [gatePda] = await findGatePda(gateId, GPASS_PROGRAM_ID);
+  const [gatePda] = await findPrimaryAccessPda(gateId, GPASS_PROGRAM_ID);
   let gate: unknown = null;
   let sdkError: Error | undefined;
 
-  const fetchGateMethod = client.fetchGate as ((input: PublicKey) => Promise<unknown>) | undefined;
+  const fetchGateMethod = getSdkClientMethod<((input: PublicKey) => Promise<unknown>)>(client, [
+    "fetchAccess",
+    "fetchGate"
+  ]);
   if (typeof fetchGateMethod === "function") {
     try {
       gate = await fetchGateMethod.call(client, gateId);
@@ -1268,10 +1324,30 @@ async function fetchGateWithCompatibility(
   }
 
   if (!gate) {
+    if (connection) {
+      try {
+        const rawMatches = await connection.getProgramAccounts(GPASS_PROGRAM_ID, {
+          filters: [{ memcmp: { offset: 9, bytes: gateId.toBase58() } }]
+        });
+        const decoded = rawMatches
+          .map((entry) => decodeAccessLikeAccountData(entry.account.data))
+          .find((entry) => Boolean(entry));
+        if (decoded) {
+          gate = decoded;
+        }
+      } catch {
+        // Ignore raw fallback failures.
+      }
+    }
+  }
+
+  if (!gate) {
     const clientAny = client as Record<string, unknown>;
     const program = clientAny.program as Record<string, unknown> | undefined;
     const accountNamespace = program?.account as Record<string, unknown> | undefined;
     const gateAccountClient =
+      (accountNamespace?.Access as Record<string, unknown> | undefined) ??
+      (accountNamespace?.access as Record<string, unknown> | undefined) ??
       (accountNamespace?.Gate as Record<string, unknown> | undefined) ??
       (accountNamespace?.gate as Record<string, unknown> | undefined);
 
@@ -1430,7 +1506,7 @@ async function gateExistsOnConnection(gateId: PublicKey, connection: Connection)
       string,
       unknown
     >;
-    const { gate } = await fetchGateWithCompatibility(client, gateId);
+    const { gate } = await fetchGateWithCompatibility(client, gateId, connection);
     return Boolean(gate);
   } catch {
     return false;
@@ -1459,11 +1535,161 @@ async function discoverGateCluster(
   return null;
 }
 
-function resolveCommunityProfile(gateId: string): CommunityProfile {
-  if (!gateId) {
-    return DEFAULT_COMMUNITY_PROFILE;
+function resolveMetadataHttpUri(uri: string) {
+  const trimmed = uri.trim();
+  if (trimmed.startsWith("irys://")) {
+    return `https://gateway.irys.xyz/${trimmed.slice("irys://".length)}`;
   }
-  return COMMUNITY_PROFILES_BY_GATE[gateId] ?? DEFAULT_COMMUNITY_PROFILE;
+  if (trimmed.startsWith("ipfs://")) {
+    return `https://ipfs.io/ipfs/${trimmed.slice("ipfs://".length)}`;
+  }
+  if (trimmed.startsWith("ar://")) {
+    return `https://arweave.net/${trimmed.slice("ar://".length)}`;
+  }
+  return trimmed;
+}
+
+function resolveCommunityProfile(
+  gateId: string,
+  metadataProfileOverrides?: Partial<CommunityProfile>
+): CommunityProfile {
+  const base = gateId ? COMMUNITY_PROFILES_BY_GATE[gateId] ?? DEFAULT_COMMUNITY_PROFILE : DEFAULT_COMMUNITY_PROFILE;
+  return {
+    ...base,
+    ...metadataProfileOverrides,
+    passActions:
+      metadataProfileOverrides?.passActions && metadataProfileOverrides.passActions.length > 0
+        ? metadataProfileOverrides.passActions
+        : base.passActions,
+    failActions:
+      metadataProfileOverrides?.failActions && metadataProfileOverrides.failActions.length > 0
+        ? metadataProfileOverrides.failActions
+        : base.failActions
+  };
+}
+
+function parseCommunityProfileFromMetadata(raw: unknown): Partial<CommunityProfile> {
+  if (!raw || typeof raw !== "object") {
+    return {};
+  }
+  const metadata = raw as Record<string, unknown>;
+  const branding =
+    metadata.branding && typeof metadata.branding === "object"
+      ? (metadata.branding as Record<string, unknown>)
+      : {};
+  const support =
+    metadata.support && typeof metadata.support === "object"
+      ? (metadata.support as Record<string, unknown>)
+      : {};
+  const integrations =
+    metadata.integrations && typeof metadata.integrations === "object"
+      ? (metadata.integrations as Record<string, unknown>)
+      : {};
+  const links =
+    metadata.links && typeof metadata.links === "object"
+      ? (metadata.links as Record<string, unknown>)
+      : {};
+
+  const parseActions = (input: unknown): CommunityAction[] => {
+    if (!Array.isArray(input)) {
+      return [];
+    }
+    return input
+      .map((entry) => {
+        if (!entry || typeof entry !== "object") {
+          return null;
+        }
+        const action = entry as Record<string, unknown>;
+        const label = typeof action.label === "string" ? action.label.trim() : "";
+        const href = typeof action.href === "string" ? action.href.trim() : "";
+        if (!label || !href) {
+          return null;
+        }
+        return { label, href };
+      })
+      .filter((entry): entry is CommunityAction => Boolean(entry));
+  };
+
+  const passActions = parseActions(metadata.passActions);
+  const failActions = parseActions(metadata.failActions);
+  const discord = integrations.discord && typeof integrations.discord === "object"
+    ? (integrations.discord as Record<string, unknown>)
+    : {};
+  const telegram = integrations.telegram && typeof integrations.telegram === "object"
+    ? (integrations.telegram as Record<string, unknown>)
+    : {};
+
+  const supportUrl =
+    typeof support.url === "string"
+      ? support.url.trim()
+      : typeof branding.supportUrl === "string"
+        ? branding.supportUrl.trim()
+        : "";
+  const verifyUrl = typeof links.verifyUrl === "string" ? links.verifyUrl.trim() : "";
+  const supportLabel =
+    typeof support.label === "string"
+      ? support.label.trim()
+      : typeof branding.supportLabel === "string"
+        ? branding.supportLabel.trim()
+        : "";
+
+  const integrationActions: CommunityAction[] = [];
+  const discordInvite = typeof discord.inviteUrl === "string" ? discord.inviteUrl.trim() : "";
+  if (discordInvite) {
+    integrationActions.push({ label: "Join Discord", href: discordInvite });
+  }
+  const telegramInvite = typeof telegram.inviteUrl === "string" ? telegram.inviteUrl.trim() : "";
+  if (telegramInvite) {
+    integrationActions.push({ label: "Join Telegram", href: telegramInvite });
+  }
+
+  return {
+    name:
+      typeof branding.name === "string" && branding.name.trim()
+        ? branding.name.trim()
+        : undefined,
+    subtitle:
+      typeof branding.subtitle === "string" && branding.subtitle.trim()
+        ? branding.subtitle.trim()
+        : undefined,
+    accent:
+      typeof branding.themeColor === "string" && branding.themeColor.trim()
+        ? branding.themeColor.trim()
+        : typeof branding.accent === "string" && branding.accent.trim()
+          ? branding.accent.trim()
+          : undefined,
+    supportLabel: supportLabel || undefined,
+    passActions:
+      passActions.length > 0
+        ? passActions
+        : supportUrl
+          ? [{ label: "Community Support", href: supportUrl }]
+          : integrationActions,
+    failActions:
+      failActions.length > 0
+        ? failActions
+        : verifyUrl
+          ? [{ label: "Verify Access", href: verifyUrl }]
+          : supportUrl
+            ? [{ label: "How To Qualify", href: supportUrl }]
+          : integrationActions
+  };
+}
+
+async function fetchGateMetadataDocument(metadataUri: string) {
+  const resolvedUri = resolveMetadataHttpUri(metadataUri);
+  const response = await fetch(resolvedUri, {
+    headers: { Accept: "application/json" },
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    throw new Error(`Metadata fetch failed (${response.status}).`);
+  }
+  const json = (await response.json()) as unknown;
+  return {
+    resolvedUri,
+    json
+  };
 }
 
 function formatPlatformList(platforms: number[]) {
@@ -1522,7 +1748,11 @@ function renderEligibilitySummary(criteriaVariant?: { type: string; config: Reco
       ];
     }
     case "multiDao": {
-      const requiredGates = Array.isArray(config.requiredGates) ? config.requiredGates.length : 0;
+      const requiredGates = Array.isArray(config.requiredAccessSpaces)
+        ? config.requiredAccessSpaces.length
+        : Array.isArray(config.requiredGates)
+          ? config.requiredGates.length
+          : 0;
       const requireAll = Boolean(config.requireAll);
       return [
         requireAll
@@ -1880,6 +2110,7 @@ export default function AccessPage() {
       ...prev,
       status: "loading",
       gateId: gateId.toBase58(),
+      metadataUri: undefined,
       message: "Loading gate configuration...",
       profile: resolveCommunityProfile(gateId.toBase58())
     }));
@@ -1889,7 +2120,7 @@ export default function AccessPage() {
       const probeSlot = await connection.getSlot("processed");
       setLastRpcProbeSlot(probeSlot);
       const client = await getClient({ readOnly: true });
-      const { gate, sdkError } = await fetchGateWithCompatibility(client, gateId);
+      const { gate, sdkError } = await fetchGateWithCompatibility(client, gateId, connection);
       compatibilityErrorMessage = sdkError?.message;
 
       if (!gate) {
@@ -1901,13 +2132,27 @@ export default function AccessPage() {
         throw new Error("Could not read gate criteria.");
       }
 
+      const gateRecord = gate as Record<string, unknown>;
+      const metadataUri =
+        typeof gateRecord.metadataUri === "string" ? gateRecord.metadataUri.trim() : "";
+      let profileOverrides: Partial<CommunityProfile> = {};
+      if (metadataUri) {
+        try {
+          const { json } = await fetchGateMetadataDocument(metadataUri);
+          profileOverrides = parseCommunityProfileFromMetadata(json);
+        } catch {
+          // Metadata is optional; keep static profile fallback.
+        }
+      }
+
       setGateContext({
         status: "ready",
         gateId: gateId.toBase58(),
+        metadataUri: metadataUri || undefined,
         message: `Gate loaded (RPC slot ${probeSlot}). Required accounts are auto-derived for access checks.`,
         criteriaVariant,
-        gateTypeLabel: extractGateTypeLabel(gate.gateType),
-        profile: resolveCommunityProfile(gateId.toBase58())
+        gateTypeLabel: extractGateTypeLabel(gateRecord.gateType ?? gateRecord.accessType),
+        profile: resolveCommunityProfile(gateId.toBase58(), profileOverrides)
       });
       setSuggestedCluster(null);
 
@@ -1919,7 +2164,7 @@ export default function AccessPage() {
         let derivedGatePda: PublicKey | null = null;
         let derivedGateExists = false;
         try {
-          [derivedGatePda] = await findGatePda(gateId, GPASS_PROGRAM_ID);
+          [derivedGatePda] = await findPrimaryAccessPda(gateId, GPASS_PROGRAM_ID);
           if (derivedGatePda) {
             derivedGateExists = Boolean(await connection.getAccountInfo(derivedGatePda));
           }
@@ -2014,7 +2259,7 @@ export default function AccessPage() {
       }
       try {
         const gateId = parsePublicKey("Gate ID", gateIdRaw, true)!;
-        const [gatePda] = await findGatePda(gateId, GPASS_PROGRAM_ID);
+        const [gatePda] = await findPrimaryAccessPda(gateId, GPASS_PROGRAM_ID);
         if (!cancelled) {
           setDerivedGatePda(gatePda.toBase58());
         }
@@ -2535,6 +2780,7 @@ export default function AccessPage() {
       const effectiveForm = derivedForm ?? memberForm;
 
       const params = {
+        accessId: parsePublicKey("Gate ID", effectiveForm.gateId, true)!,
         gateId: parsePublicKey("Gate ID", effectiveForm.gateId, true)!,
         user: wallet.publicKey,
         reputationAccount: parsePublicKey("Reputation account", effectiveForm.reputationAccount, false),
@@ -2564,9 +2810,12 @@ export default function AccessPage() {
 
       const client = await getClient();
       latestClient = client;
-      const method = client.checkGate as ((arg: unknown) => unknown) | undefined;
-      if (typeof method !== "function") {
-        throw new Error("SDK client is missing checkGate.");
+      const method = getSdkClientMethod<((arg: unknown) => unknown)>(client, [
+        "checkAccess",
+        "checkGate"
+      ]);
+      if (!method) {
+        throw new Error("SDK client is missing checkAccess/checkGate.");
       }
 
       const result = await Promise.resolve(method.call(client, params));
@@ -3149,6 +3398,11 @@ export default function AccessPage() {
                 {gateContext.gateTypeLabel && (
                   <Typography sx={{ mt: 0.7, fontSize: "0.85rem", color: "text.secondary" }}>
                     Gate Type: {gateContext.gateTypeLabel}
+                  </Typography>
+                )}
+                {gateContext.metadataUri && (
+                  <Typography sx={{ mt: 0.4, fontSize: "0.8rem", color: "text.secondary" }}>
+                    Metadata URI: <span className="mono">{gateContext.metadataUri}</span>
                   </Typography>
                 )}
               </Box>

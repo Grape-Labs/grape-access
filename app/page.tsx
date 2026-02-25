@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import Image from "next/image";
 import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
@@ -44,7 +44,7 @@ import {
 } from "@mui/material";
 import Grid from "@mui/material/Grid2";
 import { Buffer } from "buffer";
-import { AnchorProvider } from "@coral-xyz/anchor";
+import { AnchorProvider, BorshAccountsCoder } from "@coral-xyz/anchor";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useWallet } from "@solana/wallet-adapter-react";
 import {
@@ -106,6 +106,23 @@ declare global {
 interface CreateFormState {
   gateId: string;
   authority: string;
+  metadataUri: string;
+  metadataName: string;
+  metadataSubtitle: string;
+  metadataDescription: string;
+  metadataLogoUri: string;
+  metadataBannerUri: string;
+  metadataAccent: string;
+  metadataSupportLabel: string;
+  metadataSupportUrl: string;
+  metadataDiscordGuildId: string;
+  metadataDiscordPassRoleId: string;
+  metadataDiscordFailAction: string;
+  metadataTelegramChatId: string;
+  metadataTelegramPassEntitlement: string;
+  metadataRevalidationIntervalSeconds: string;
+  metadataRevalidationLeaseSeconds: string;
+  metadataVerifyUrl: string;
   criteriaKind: CriteriaKind;
   gateTypeKind: GateTypeKind;
   selectedPlatforms: number[];
@@ -169,6 +186,7 @@ interface MemberDeriveState {
 interface AdminFormState {
   authorityFilter: string;
   selectedGateId: string;
+  metadataUri: string;
   setActiveValue: boolean;
   newAuthority: string;
   closeRecipient: string;
@@ -182,6 +200,8 @@ interface AdminGateItem {
   isActive: boolean;
   totalChecks: string;
   successfulChecks: string;
+  hasKnownStats: boolean;
+  statsLabel: string;
 }
 
 interface GateTemplate {
@@ -205,6 +225,7 @@ type AdminBusyAction =
   | "loadGates"
   | "fetchGate"
   | "loadEditor"
+  | "updateMetadataUri"
   | "setActive"
   | "setAuthority"
   | "updateCriteria"
@@ -218,12 +239,19 @@ const {
   GRAPE_VERIFICATION_PROGRAM_ID,
   VINE_REPUTATION_PROGRAM_ID,
   VerificationPlatform,
+  AccessCriteriaFactory,
+  AccessTypeFactory,
+  findAccessPda,
   GateCriteriaFactory,
   GateTypeFactory,
   findGatePda,
   findGrapeIdentityPda,
   findGrapeLinkPda
 } = GPassSdk;
+
+const CriteriaFactory = (AccessCriteriaFactory ?? GateCriteriaFactory) as typeof GateCriteriaFactory;
+const TypeFactory = (AccessTypeFactory ?? GateTypeFactory) as typeof GateTypeFactory;
+const findPrimaryAccessPda = (findAccessPda ?? findGatePda) as typeof findGatePda;
 
 const TOKEN_PROGRAM_ID = new PublicKey(
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
@@ -269,6 +297,23 @@ const PLATFORM_TAGS: Record<number, string> = {
 const defaultCreateForm: CreateFormState = {
   gateId: "",
   authority: "",
+  metadataUri: "",
+  metadataName: "",
+  metadataSubtitle: "",
+  metadataDescription: "",
+  metadataLogoUri: "",
+  metadataBannerUri: "",
+  metadataAccent: "#6db8ff",
+  metadataSupportLabel: "",
+  metadataSupportUrl: "",
+  metadataDiscordGuildId: "",
+  metadataDiscordPassRoleId: "",
+  metadataDiscordFailAction: "remove_role",
+  metadataTelegramChatId: "",
+  metadataTelegramPassEntitlement: "member",
+  metadataRevalidationIntervalSeconds: "3600",
+  metadataRevalidationLeaseSeconds: "86400",
+  metadataVerifyUrl: "",
   criteriaKind: "combined",
   gateTypeKind: "timeLimited",
   selectedPlatforms: [VerificationPlatform.Discord as number],
@@ -319,6 +364,7 @@ const defaultMemberForm: MemberFormState = {
 const defaultAdminForm: AdminFormState = {
   authorityFilter: "",
   selectedGateId: "",
+  metadataUri: "",
   setActiveValue: true,
   newAuthority: "",
   closeRecipient: "",
@@ -528,6 +574,65 @@ function asBooleanValue(value: unknown): boolean | undefined {
   return undefined;
 }
 
+function asCounterString(value: unknown): string | undefined {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value).toString();
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed === "") {
+      return undefined;
+    }
+    return /^[0-9]+$/.test(trimmed) ? trimmed : undefined;
+  }
+  if (typeof value === "object") {
+    const maybe = value as { toString?: () => string };
+    if (typeof maybe.toString === "function") {
+      try {
+        const rendered = maybe.toString().trim();
+        if (/^[0-9]+$/.test(rendered)) {
+          return rendered;
+        }
+      } catch {
+        return undefined;
+      }
+    }
+  }
+  return undefined;
+}
+
+function pickCounterFromAccount(
+  account: Record<string, unknown>,
+  keys: string[]
+): string | undefined {
+  for (const key of keys) {
+    const direct = asCounterString(account[key]);
+    if (direct !== undefined) {
+      return direct;
+    }
+  }
+  const nestedData =
+    account.data && typeof account.data === "object"
+      ? (account.data as Record<string, unknown>)
+      : undefined;
+  if (!nestedData) {
+    return undefined;
+  }
+  for (const key of keys) {
+    const nested = asCounterString(nestedData[key]);
+    if (nested !== undefined) {
+      return nested;
+    }
+  }
+  return undefined;
+}
+
 function bytesFromUnknown(value: unknown): Uint8Array | null {
   if (!value) {
     return null;
@@ -561,6 +666,76 @@ function toPubkeyString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+function readAuthorityString(value: unknown): string {
+  if (!value) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "object") {
+    const maybePk = value as { toBase58?: () => string };
+    if (typeof maybePk.toBase58 === "function") {
+      try {
+        return maybePk.toBase58();
+      } catch {
+        return "";
+      }
+    }
+  }
+  return "";
+}
+
+function getAccessLikeAccountNamesFromIdl(): string[] {
+  const sdkAny = GPassSdk as Record<string, unknown>;
+  const idl = sdkAny.IDL as { accounts?: Array<{ name?: string }> } | undefined;
+  if (!idl?.accounts) {
+    return [];
+  }
+  return idl.accounts
+    .map((account) => account.name)
+    .filter((name): name is string => Boolean(name && /(access|gate)/i.test(name)));
+}
+
+function decodeAccessLikeAccountData(
+  data: Buffer | Uint8Array
+): Record<string, unknown> | null {
+  const sdkAny = GPassSdk as Record<string, unknown>;
+  const idl = sdkAny.IDL;
+  if (!idl) {
+    return null;
+  }
+
+  try {
+    const coder = new BorshAccountsCoder(idl as any);
+    const bytes = Buffer.from(data);
+    const accountNames = getAccessLikeAccountNamesFromIdl();
+    for (const accountName of accountNames) {
+      const discriminator = BorshAccountsCoder.accountDiscriminator(accountName);
+      if (bytes.subarray(0, 8).equals(discriminator)) {
+        const decoded = coder.decodeUnchecked(accountName, bytes) as Record<string, unknown>;
+        return decoded;
+      }
+    }
+  } catch {
+    // Ignore decode failures and let higher-level fallbacks continue.
+  }
+
+  return null;
+}
+
+function readAccessIdFromRawData(data: Buffer | Uint8Array): PublicKey | undefined {
+  const bytes = Buffer.from(data);
+  if (bytes.length < 41) {
+    return undefined;
+  }
+  try {
+    return new PublicKey(bytes.subarray(9, 41));
+  } catch {
+    return undefined;
+  }
+}
+
 function buildCreateFormUpdatesFromGateData(gateData: Record<string, unknown>): Partial<CreateFormState> {
   const criteriaVariant = extractCriteriaVariant(gateData.criteria);
   if (!criteriaVariant) {
@@ -570,13 +745,17 @@ function buildCreateFormUpdatesFromGateData(gateData: Record<string, unknown>): 
   const updates: Partial<CreateFormState> = {
     criteriaKind: criteriaVariant.type as CriteriaKind
   };
-  const gateId = toPubkeyString(gateData.gateId);
+  const gateId = toPubkeyString(gateData.gateId ?? gateData.accessId);
   const authority = toPubkeyString(gateData.authority);
+  const metadataUri = typeof gateData.metadataUri === "string" ? gateData.metadataUri : "";
   if (gateId) {
     updates.gateId = gateId;
   }
   if (authority) {
     updates.authority = authority;
+  }
+  if (metadataUri) {
+    updates.metadataUri = metadataUri;
   }
 
   const config = criteriaVariant.config;
@@ -656,7 +835,11 @@ function buildCreateFormUpdatesFromGateData(gateData: Record<string, unknown>): 
       break;
     }
     case "multiDao": {
-      const requiredRaw = Array.isArray(config.requiredGates) ? config.requiredGates : [];
+      const requiredRaw = Array.isArray(config.requiredAccessSpaces)
+        ? config.requiredAccessSpaces
+        : Array.isArray(config.requiredGates)
+          ? config.requiredGates
+          : [];
       const required = requiredRaw
         .map((entry) => toPubkeyString(entry))
         .filter((entry) => Boolean(entry));
@@ -708,7 +891,7 @@ function buildCreateFormUpdatesFromGateData(gateData: Record<string, unknown>): 
       break;
   }
 
-  const gateType = gateData.gateType;
+  const gateType = gateData.gateType ?? gateData.accessType;
   if (gateType && typeof gateType === "object") {
     const gateTypeObj = gateType as Record<string, unknown>;
     if ("singleUse" in gateTypeObj) {
@@ -905,13 +1088,15 @@ async function resolveSdkClient(
 ) {
   const readOnly = options?.readOnly ?? false;
   const sdkAny = GPassSdk as Record<string, unknown>;
-  const GpassClientCtor = sdkAny.GpassClient as
+  const AccessClientCtor =
+    (sdkAny.GrapeAccessClient as (new (...args: unknown[]) => unknown) | undefined) ??
+    (sdkAny.GpassClient as
     | (new (...args: unknown[]) => unknown)
-    | undefined;
+    | undefined);
 
-  if (typeof GpassClientCtor !== "function") {
+  if (typeof AccessClientCtor !== "function") {
     throw new Error(
-      "Installed SDK does not export GpassClient. Please update @grapenpm/grape-access-sdk."
+      "Installed SDK does not export GrapeAccessClient/GpassClient. Please update @grapenpm/grape-access-sdk."
     );
   }
 
@@ -937,7 +1122,7 @@ async function resolveSdkClient(
     commitment: "confirmed"
   });
 
-  return new GpassClientCtor(provider, GPASS_PROGRAM_ID);
+  return new AccessClientCtor(provider, GPASS_PROGRAM_ID);
 }
 
 async function executeSdkMethod({
@@ -953,16 +1138,144 @@ async function executeSdkMethod({
 }) {
   const client = await resolveSdkClient(connection, wallet);
   const clientAny = client as Record<string, unknown>;
-  const methodName = action === "create" ? "initializeGate" : "checkGate";
-  const method = clientAny[methodName] as ((arg: unknown) => unknown) | undefined;
+  const methodNames =
+    action === "create"
+      ? ["initializeAccess", "initializeGate"]
+      : ["checkAccess", "checkGate"];
+  const method = methodNames
+    .map((name) => clientAny[name] as ((arg: unknown) => unknown) | undefined)
+    .find((candidate) => typeof candidate === "function");
 
-  if (typeof method !== "function") {
+  if (!method) {
     throw new Error(
-      `SDK client is missing ${methodName}. Please verify @grapenpm/grape-access-sdk version.`
+      `SDK client is missing ${methodNames.join(" / ")}. Please verify @grapenpm/grape-access-sdk version.`
     );
   }
 
   return await Promise.resolve(method.call(client, params));
+}
+
+function getSdkClientMethod<T extends (...args: any[]) => any>(
+  client: Record<string, unknown>,
+  names: string[]
+): T | undefined {
+  for (const name of names) {
+    const candidate = client[name];
+    if (typeof candidate === "function") {
+      return candidate as T;
+    }
+  }
+  return undefined;
+}
+
+function buildMetadataCriteriaSummary(form: CreateFormState): string[] {
+  switch (form.criteriaKind) {
+    case "combined":
+      return [
+        `Minimum reputation: ${form.minPoints} (season ${form.season})`,
+        `Verification platforms: ${form.selectedPlatforms.join(", ") || "any"}`,
+        form.requireWalletLink ? "Wallet link required" : "Wallet link optional"
+      ];
+    case "minReputation":
+      return [`Minimum reputation: ${form.minPoints} (season ${form.season})`];
+    case "verifiedIdentity":
+    case "verifiedWithWallet":
+      return [`Verification platforms: ${form.selectedPlatforms.join(", ") || "any"}`];
+    case "timeLockedReputation":
+      return [
+        `Minimum reputation: ${form.minPoints} (season ${form.season})`,
+        `Minimum hold: ${form.minHoldDurationSeconds} seconds`
+      ];
+    case "multiDao":
+      return [
+        `Required access spaces: ${splitCsv(form.requiredGates).length}`,
+        form.requireAll ? "Must pass all configured spaces" : "Pass any configured space"
+      ];
+    case "tokenHolding":
+      return [`Minimum token amount: ${form.minAmount}`, form.checkAta ? "ATA enforced" : "Custom token account allowed"];
+    case "nftCollection":
+      return [`Minimum NFTs: ${form.minCount}`];
+    case "customProgram":
+      return [`Custom program: ${form.programId || "not set"}`];
+    default:
+      return [];
+  }
+}
+
+function buildAccessMetadataManifest(form: CreateFormState) {
+  const eligibilitySummary = buildMetadataCriteriaSummary(form).join(". ");
+  const discordEnabled = Boolean(form.metadataDiscordGuildId || form.metadataDiscordPassRoleId);
+  const telegramEnabled = Boolean(form.metadataTelegramChatId || form.metadataTelegramPassEntitlement);
+
+  return {
+    schema: "grape.access-manifest.v1",
+    generatedAt: new Date().toISOString(),
+    gateId: form.gateId || null,
+    accessId: form.gateId || null,
+    branding: {
+      name: form.metadataName || null,
+      subtitle: form.metadataSubtitle || null,
+      description: form.metadataDescription || null,
+      logo: form.metadataLogoUri || null,
+      banner: form.metadataBannerUri || null,
+      themeColor: form.metadataAccent || null,
+      accent: form.metadataAccent || null,
+      supportLabel: form.metadataSupportLabel || null,
+      supportUrl: form.metadataSupportUrl || null
+    },
+    eligibility: {
+      criteriaKind: form.criteriaKind,
+      accessTypeKind: form.gateTypeKind,
+      summary: eligibilitySummary
+    },
+    integrations: {
+      discord: discordEnabled
+        ? {
+            guildId: form.metadataDiscordGuildId || null,
+            passRoleId: form.metadataDiscordPassRoleId || null,
+            failAction: form.metadataDiscordFailAction || "remove_role"
+          }
+        : null,
+      telegram: telegramEnabled
+        ? {
+            chatId: form.metadataTelegramChatId || null,
+            passEntitlement: form.metadataTelegramPassEntitlement || "member"
+          }
+        : null
+    },
+    revalidation: {
+      intervalSeconds: Number.parseInt(form.metadataRevalidationIntervalSeconds, 10) || 3600,
+      leaseSeconds: Number.parseInt(form.metadataRevalidationLeaseSeconds, 10) || 86400
+    },
+    links: {
+      verifyUrl: form.metadataVerifyUrl || null
+    }
+  };
+}
+
+function resolveIrysNetwork(cluster: ClusterKind) {
+  return cluster === "mainnet-beta" ? "mainnet" : "devnet";
+}
+
+function resolveMetadataHttpUri(uri: string) {
+  const trimmed = uri.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (trimmed.startsWith("irys://")) {
+    const id = trimmed.slice("irys://".length).trim();
+    return id ? `https://gateway.irys.xyz/${id}` : "";
+  }
+  return trimmed;
+}
+
+function pickPreferredIrysUri(input: { irysUri?: string; uri?: string }) {
+  const irysUri = typeof input.irysUri === "string" ? input.irysUri.trim() : "";
+  if (irysUri) {
+    return irysUri;
+  }
+  const uri = typeof input.uri === "string" ? input.uri.trim() : "";
+  return uri;
 }
 
 function extractSignature(result: unknown) {
@@ -1090,6 +1403,9 @@ export default function Page() {
   const [adminGateDetails, setAdminGateDetails] = useState<Record<string, unknown> | null>(null);
 
   const [createBusy, setCreateBusy] = useState(false);
+  const [metadataUploadBusy, setMetadataUploadBusy] = useState(false);
+  const [logoUploadBusy, setLogoUploadBusy] = useState(false);
+  const [bannerUploadBusy, setBannerUploadBusy] = useState(false);
   const [checkBusy, setCheckBusy] = useState(false);
   const [checkDeriveBusy, setCheckDeriveBusy] = useState(false);
   const [memberBusy, setMemberBusy] = useState(false);
@@ -1107,6 +1423,8 @@ export default function Page() {
     "info"
   );
   const checkDeriveAutoKeyRef = useRef("");
+  const logoFileInputRef = useRef<HTMLInputElement | null>(null);
+  const bannerFileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (typeof window !== "undefined" && !window.Buffer) {
@@ -1271,12 +1589,34 @@ export default function Page() {
     () => adminGates.find((gate) => gate.gateId === adminForm.selectedGateId),
     [adminGates, adminForm.selectedGateId]
   );
+  const selectedGateAuthority = useMemo(() => {
+    if (selectedAdminGate?.authority) {
+      return selectedAdminGate.authority;
+    }
+    if (adminGateDetails) {
+      const authorityFromDetails = readAuthorityString(
+        (adminGateDetails as Record<string, unknown>).authority
+      );
+      if (authorityFromDetails) {
+        return authorityFromDetails;
+      }
+    }
+    return "";
+  }, [selectedAdminGate, adminGateDetails]);
   const isSelectedGateAuthority = Boolean(
-    selectedAdminGate && connectedWalletAddress && selectedAdminGate.authority === connectedWalletAddress
+    connectedWalletAddress && selectedGateAuthority && selectedGateAuthority === connectedWalletAddress
+  );
+  const canAttemptSelectedGateWrite = Boolean(
+    isWalletConnected &&
+      adminForm.selectedGateId.trim() &&
+      (!selectedGateAuthority || selectedGateAuthority === connectedWalletAddress)
   );
   const selectedGatePassRate = useMemo(() => {
     if (!selectedAdminGate) {
       return null;
+    }
+    if (!selectedAdminGate.hasKnownStats) {
+      return "Unknown";
     }
     const total = Number.parseInt(selectedAdminGate.totalChecks, 10);
     const passed = Number.parseInt(selectedAdminGate.successfulChecks, 10);
@@ -1308,6 +1648,7 @@ export default function Page() {
     () => ({
       gateId: createForm.gateId,
       authority: createForm.authority || "wallet.publicKey",
+      metadataUri: createForm.metadataUri || undefined,
       criteria: {
         type: createForm.criteriaKind,
         vineConfig: createForm.vineConfig,
@@ -1331,8 +1672,46 @@ export default function Page() {
         type: createForm.gateTypeKind,
         durationSeconds: createForm.durationSeconds,
         intervalSeconds: createForm.intervalSeconds
-      }
+      },
+      metadataManifest:
+        createForm.metadataName ||
+        createForm.metadataSubtitle ||
+        createForm.metadataDescription ||
+        createForm.metadataLogoUri ||
+        createForm.metadataBannerUri ||
+        createForm.metadataSupportLabel ||
+        createForm.metadataSupportUrl ||
+        createForm.metadataDiscordGuildId ||
+        createForm.metadataDiscordPassRoleId ||
+        createForm.metadataTelegramChatId ||
+        createForm.metadataVerifyUrl
+          ? buildAccessMetadataManifest(createForm)
+          : undefined
     }),
+    [createForm]
+  );
+
+  const createMetadataManifestPreview = useMemo(
+    () =>
+      buildAccessMetadataManifest(createForm),
+    [createForm]
+  );
+
+  const hasMetadataManifestDraft = useMemo(
+    () =>
+      Boolean(
+        createForm.metadataName ||
+          createForm.metadataSubtitle ||
+        createForm.metadataDescription ||
+        createForm.metadataLogoUri ||
+        createForm.metadataBannerUri ||
+        createForm.metadataSupportLabel ||
+        createForm.metadataSupportUrl ||
+        createForm.metadataDiscordGuildId ||
+        createForm.metadataDiscordPassRoleId ||
+        createForm.metadataTelegramChatId ||
+        createForm.metadataVerifyUrl
+      ),
     [createForm]
   );
   const gateBuilderPreview = useMemo(() => {
@@ -1453,8 +1832,11 @@ export default function Page() {
 
   const fetchGateRecordById = async (gateId: PublicKey): Promise<Record<string, unknown> | null> => {
     const client = await getAdminClient({ readOnly: true });
-    const [gatePda] = await findGatePda(gateId, GPASS_PROGRAM_ID);
-    const fetchGateMethod = client.fetchGate as ((input: PublicKey) => Promise<unknown>) | undefined;
+    const [gatePda] = await findPrimaryAccessPda(gateId, GPASS_PROGRAM_ID);
+    const fetchGateMethod = getSdkClientMethod<((input: PublicKey) => Promise<unknown>)>(client, [
+      "fetchAccess",
+      "fetchGate"
+    ]);
 
     let gate: unknown = null;
     if (typeof fetchGateMethod === "function") {
@@ -1466,10 +1848,30 @@ export default function Page() {
     }
 
     if (!gate) {
+      if (connection) {
+        try {
+          const rawMatches = await connection.getProgramAccounts(GPASS_PROGRAM_ID, {
+            filters: [{ memcmp: { offset: 9, bytes: gateId.toBase58() } }]
+          });
+          const decodedRaw = rawMatches
+            .map((entry) => decodeAccessLikeAccountData(entry.account.data))
+            .find((entry) => Boolean(entry));
+          if (decodedRaw) {
+            gate = decodedRaw;
+          }
+        } catch {
+          // Ignore raw fallback failures.
+        }
+      }
+    }
+
+    if (!gate) {
       const clientAny = client as Record<string, unknown>;
       const gateAccountClient =
         (clientAny.program as Record<string, unknown> | undefined)?.account &&
-        (((clientAny.program as Record<string, unknown>).account as Record<string, unknown>).Gate ??
+        (((clientAny.program as Record<string, unknown>).account as Record<string, unknown>).Access ??
+          ((clientAny.program as Record<string, unknown>).account as Record<string, unknown>).access ??
+          ((clientAny.program as Record<string, unknown>).account as Record<string, unknown>).Gate ??
           ((clientAny.program as Record<string, unknown>).account as Record<string, unknown>).gate);
       const fetchNullable =
         (gateAccountClient as Record<string, unknown> | undefined)?.fetchNullable as
@@ -1874,22 +2276,27 @@ export default function Page() {
     try {
       const gateId = parsePublicKey("Gate ID", gateIdRaw, true)!;
       const client = await getMemberClient();
-      const [gatePda] = await findGatePda(gateId, GPASS_PROGRAM_ID);
-      const fetchGateMethod = client.fetchGate as ((input: PublicKey) => Promise<unknown>) | undefined;
+      const [gatePda] = await findPrimaryAccessPda(gateId, GPASS_PROGRAM_ID);
+      const fetchGateMethod = getSdkClientMethod<((input: PublicKey) => Promise<unknown>)>(client, [
+        "fetchAccess",
+        "fetchGate"
+      ]);
       let gate: unknown = null;
       let sdkFetchError: Error | undefined;
       if (typeof fetchGateMethod === "function") {
         try {
           gate = await fetchGateMethod.call(client, gateId);
         } catch (error) {
-          sdkFetchError = error instanceof Error ? error : new Error("Unknown SDK fetchGate error.");
+          sdkFetchError = error instanceof Error ? error : new Error("Unknown SDK fetch access error.");
         }
       }
       if (!gate) {
         const clientAny = client as Record<string, unknown>;
         const gateAccountClient =
           (clientAny.program as Record<string, unknown> | undefined)?.account &&
-          (((clientAny.program as Record<string, unknown>).account as Record<string, unknown>).Gate ??
+          (((clientAny.program as Record<string, unknown>).account as Record<string, unknown>).Access ??
+            ((clientAny.program as Record<string, unknown>).account as Record<string, unknown>).access ??
+            ((clientAny.program as Record<string, unknown>).account as Record<string, unknown>).Gate ??
             ((clientAny.program as Record<string, unknown>).account as Record<string, unknown>).gate);
         const fetchNullable =
           (gateAccountClient as Record<string, unknown> | undefined)?.fetchNullable as
@@ -2291,28 +2698,150 @@ export default function Page() {
     notify("Gate Builder switched to create mode.", "info");
   };
 
+  const handleUploadMetadataToIrys = async () => {
+    const payload = buildAccessMetadataManifest(createForm);
+    setMetadataUploadBusy(true);
+    try {
+      const response = await fetch("/api/irys/upload-json", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          payload,
+          network: resolveIrysNetwork(cluster),
+          filename:
+            createForm.gateId.trim() !== ""
+              ? `grape-access-${createForm.gateId.trim()}.json`
+              : "grape-access-metadata.json"
+        })
+      });
+
+      const body = (await response.json().catch(() => ({}))) as {
+        uri?: string;
+        irysUri?: string;
+        id?: string;
+        error?: string;
+      };
+
+      if (!response.ok || (!body.uri && !body.irysUri)) {
+        throw new Error(body.error || "Failed to upload metadata JSON to Irys.");
+      }
+
+      const uploadedMetadataUri = pickPreferredIrysUri(body);
+      if (!uploadedMetadataUri) {
+        throw new Error("Irys upload succeeded but no URI was returned.");
+      }
+      updateCreateForm("metadataUri", uploadedMetadataUri);
+      appendActivity({
+        label: "Upload Metadata",
+        message: `Metadata uploaded to Irys (${body.id ?? "ok"}).`
+      });
+      notify("Metadata uploaded. Metadata URI field updated.", "success");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Failed to upload metadata.", "error");
+    } finally {
+      setMetadataUploadBusy(false);
+    }
+  };
+
+  const uploadAssetFileToIrys = async (file: File, kind: "logo" | "banner") => {
+    if (!file) {
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      notify("Only image files are supported for logo/banner upload.", "error");
+      return;
+    }
+
+    if (kind === "logo") {
+      setLogoUploadBusy(true);
+    } else {
+      setBannerUploadBusy(true);
+    }
+
+    try {
+      const formData = new FormData();
+      formData.set("file", file);
+      formData.set("network", resolveIrysNetwork(cluster));
+
+      const response = await fetch("/api/irys/upload-file", {
+        method: "POST",
+        body: formData
+      });
+
+      const body = (await response.json().catch(() => ({}))) as {
+        uri?: string;
+        irysUri?: string;
+        id?: string;
+        error?: string;
+      };
+      if (!response.ok || (!body.uri && !body.irysUri)) {
+        throw new Error(body.error || "Failed to upload file to Irys.");
+      }
+      const preferredUri = pickPreferredIrysUri(body);
+      if (!preferredUri) {
+        throw new Error("Irys upload succeeded but no URI was returned.");
+      }
+
+      if (kind === "logo") {
+        updateCreateForm("metadataLogoUri", preferredUri);
+      } else {
+        updateCreateForm("metadataBannerUri", preferredUri);
+      }
+
+      appendActivity({
+        label: `Upload ${kind === "logo" ? "Logo" : "Banner"}`,
+        message: `Uploaded ${file.name} to Irys (${body.id ?? "ok"}).`
+      });
+      notify(`${kind === "logo" ? "Logo" : "Banner"} uploaded and URI populated.`, "success");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "File upload failed.", "error");
+    } finally {
+      if (kind === "logo") {
+        setLogoUploadBusy(false);
+      } else {
+        setBannerUploadBusy(false);
+      }
+    }
+  };
+
+  const handleLogoFileSelected = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      void uploadAssetFileToIrys(file, "logo");
+    }
+    event.target.value = "";
+  };
+
+  const handleBannerFileSelected = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      void uploadAssetFileToIrys(file, "banner");
+    }
+    event.target.value = "";
+  };
+
   const buildCriteria = () => {
     const platforms = createForm.selectedPlatforms;
 
     switch (createForm.criteriaKind) {
       case "minReputation":
-        return GateCriteriaFactory.minReputation({
+        return CriteriaFactory.minReputation({
           vineConfig: parsePublicKey("OG reputation config", createForm.vineConfig, true)!,
           minPoints: parseInteger("Minimum points", createForm.minPoints, 0),
           season: parseInteger("Season", createForm.season, 0)
         } as any);
       case "verifiedIdentity":
-        return GateCriteriaFactory.verifiedIdentity({
+        return CriteriaFactory.verifiedIdentity({
           grapeSpace: parsePublicKey("Grape space", createForm.grapeSpace, true)!,
           platforms
         } as any);
       case "verifiedWithWallet":
-        return GateCriteriaFactory.verifiedWithWallet({
+        return CriteriaFactory.verifiedWithWallet({
           grapeSpace: parsePublicKey("Grape space", createForm.grapeSpace, true)!,
           platforms
         } as any);
       case "combined":
-        return GateCriteriaFactory.combined({
+        return CriteriaFactory.combined({
           vineConfig: parsePublicKey("OG reputation config", createForm.vineConfig, true)!,
           minPoints: parseInteger("Minimum points", createForm.minPoints, 0),
           season: parseInteger("Season", createForm.season, 0),
@@ -2321,7 +2850,7 @@ export default function Page() {
           requireWalletLink: createForm.requireWalletLink
         } as any);
       case "timeLockedReputation":
-        return GateCriteriaFactory.timeLockedReputation({
+        return CriteriaFactory.timeLockedReputation({
           vineConfig: parsePublicKey("OG reputation config", createForm.vineConfig, true)!,
           minPoints: parseInteger("Minimum points", createForm.minPoints, 0),
           season: parseInteger("Season", createForm.season, 0),
@@ -2332,25 +2861,25 @@ export default function Page() {
           )
         } as any);
       case "multiDao":
-        return GateCriteriaFactory.multiDao({
-          requiredGates: splitCsv(createForm.requiredGates).map((gate, index) =>
+        return CriteriaFactory.multiDao({
+          requiredAccessSpaces: splitCsv(createForm.requiredGates).map((gate, index) =>
             parsePublicKey(`Required gate #${index + 1}`, gate, true)!
           ),
           requireAll: createForm.requireAll
         } as any);
       case "tokenHolding":
-        return GateCriteriaFactory.tokenHolding({
+        return CriteriaFactory.tokenHolding({
           mint: parsePublicKey("Token mint", createForm.mint, true)!,
           minAmount: parseInteger("Minimum amount", createForm.minAmount, 0),
           checkAta: createForm.checkAta
         } as any);
       case "nftCollection":
-        return GateCriteriaFactory.nftCollection({
+        return CriteriaFactory.nftCollection({
           collectionMint: parsePublicKey("Collection mint", createForm.collectionMint, true)!,
           minCount: parseInteger("Minimum count", createForm.minCount, 1)
         } as any);
       case "customProgram":
-        return GateCriteriaFactory.customProgram({
+        return CriteriaFactory.customProgram({
           programId: parsePublicKey("Custom program ID", createForm.programId, true)!,
           instructionData: parseHexBuffer(createForm.instructionDataHex)
         } as any);
@@ -2362,15 +2891,15 @@ export default function Page() {
   const buildGateType = () => {
     switch (createForm.gateTypeKind) {
       case "singleUse":
-        return GateTypeFactory.singleUse();
+        return TypeFactory.singleUse();
       case "reusable":
-        return GateTypeFactory.reusable();
+        return TypeFactory.reusable();
       case "timeLimited":
-        return GateTypeFactory.timeLimited(
+        return TypeFactory.timeLimited(
           parseInteger("Duration seconds", createForm.durationSeconds, 1)
         );
       case "subscription":
-        return GateTypeFactory.subscription(
+        return TypeFactory.subscription(
           parseInteger("Interval seconds", createForm.intervalSeconds, 1)
         );
       default:
@@ -2387,9 +2916,12 @@ export default function Page() {
     setCreateBusy(true);
     try {
       const params = {
+        accessId: parsePublicKey("Gate ID", createForm.gateId, true)!,
         gateId: parsePublicKey("Gate ID", createForm.gateId, true)!,
         criteria: buildCriteria(),
+        accessType: buildGateType(),
         gateType: buildGateType(),
+        metadataUri: createForm.metadataUri.trim() || undefined,
         authority:
           parsePublicKey("Authority", createForm.authority, false) ?? wallet.publicKey
       };
@@ -2437,6 +2969,7 @@ export default function Page() {
       }
       const effectiveCheckForm = derivedCheckForm ?? checkForm;
       const params = {
+        accessId: parsePublicKey("Gate ID", effectiveCheckForm.gateId, true)!,
         gateId: parsePublicKey("Gate ID", effectiveCheckForm.gateId, true)!,
         user: parsePublicKey("User", effectiveCheckForm.user, true)!,
         reputationAccount: parsePublicKey(
@@ -2495,6 +3028,7 @@ export default function Page() {
       const effectiveForm = derivedForm ?? memberForm;
 
       const params = {
+        accessId: parsePublicKey("Gate ID", effectiveForm.gateId, true)!,
         gateId: parsePublicKey("Gate ID", effectiveForm.gateId, true)!,
         user: wallet.publicKey,
         reputationAccount: parsePublicKey(
@@ -2568,9 +3102,10 @@ export default function Page() {
     const authority = parsePublicKey("Authority filter", authorityValue, true)!;
 
     const client = await getAdminClient({ readOnly: true });
-    const method = client.fetchGatesByAuthority as
-      | ((authorityKey: PublicKey) => Promise<unknown[]>)
-      | undefined;
+    const method = getSdkClientMethod<((authorityKey: PublicKey) => Promise<unknown[]>)>(client, [
+      "fetchAccessesByAuthority",
+      "fetchGatesByAuthority"
+    ]);
 
     let gates: unknown[] = [];
     let usedFallbackScan = false;
@@ -2587,7 +3122,11 @@ export default function Page() {
 
     if (gates.length === 0) {
       const clientAny = client as Record<string, any>;
-      const gateAccountClient = clientAny.program?.account?.Gate ?? clientAny.program?.account?.gate;
+      const gateAccountClient =
+        clientAny.program?.account?.Access ??
+        clientAny.program?.account?.access ??
+        clientAny.program?.account?.Gate ??
+        clientAny.program?.account?.gate;
       const allMethod = gateAccountClient?.all as (() => Promise<unknown[]>) | undefined;
       if (typeof allMethod === "function") {
         try {
@@ -2613,36 +3152,89 @@ export default function Page() {
       }
     }
 
+    if (gates.length === 0 && connection) {
+      try {
+        const rawAccounts = await connection.getProgramAccounts(GPASS_PROGRAM_ID, {
+          filters: [{ memcmp: { offset: 8 + 1 + 32, bytes: authority.toBase58() } }]
+        });
+        const rawMapped = rawAccounts
+          .map((entry) => {
+            const decoded = decodeAccessLikeAccountData(entry.account.data);
+            const accessId =
+              asPublicKeyValue(decoded?.accessId ?? decoded?.gateId) ??
+              readAccessIdFromRawData(entry.account.data);
+            if (!accessId) {
+              return null;
+            }
+            return {
+              publicKey: entry.pubkey,
+              account: {
+                accessId,
+                gateId: accessId,
+                authority,
+                isActive: Boolean(decoded?.isActive),
+                totalChecks: (decoded?.totalChecks as any) ?? (decoded?.total_checks as any),
+                successfulChecks:
+                  (decoded?.successfulChecks as any) ?? (decoded?.successful_checks as any)
+              }
+            };
+          })
+          .filter((entry) => Boolean(entry)) as Array<{
+            publicKey: PublicKey;
+            account: Record<string, unknown>;
+          }>;
+
+        if (rawMapped.length > 0) {
+          gates = rawMapped;
+          usedFallbackScan = true;
+        }
+      } catch (error) {
+        const rawScanError = error instanceof Error ? error.message : "unknown raw-scan error";
+        if (primaryError) {
+          throw new Error(
+            `SDK authority fetch failed (${primaryError.message}) and raw scan failed (${rawScanError}).`
+          );
+        }
+      }
+    }
+
     if (!method && !usedFallbackScan) {
-      throw new Error("SDK client is missing fetchGatesByAuthority.");
+      throw new Error("SDK client is missing fetchAccessesByAuthority/fetchGatesByAuthority.");
     }
     if (method && primaryError && !usedFallbackScan && gates.length === 0) {
       throw new Error(`SDK authority fetch failed: ${primaryError.message}`);
     }
     const mapped: AdminGateItem[] = (Array.isArray(gates) ? gates : []).map((entry: any) => {
       const account = entry.account ?? {};
+      const totalChecksRaw = pickCounterFromAccount(account, ["totalChecks", "total_checks"]);
+      const successfulChecksRaw = pickCounterFromAccount(account, [
+        "successfulChecks",
+        "successful_checks"
+      ]);
+      const hasKnownStats =
+        totalChecksRaw !== undefined && successfulChecksRaw !== undefined;
+      const totalChecks = totalChecksRaw ?? "0";
+      const successfulChecks = successfulChecksRaw ?? "0";
       return {
         pda:
           entry.publicKey && typeof entry.publicKey.toBase58 === "function"
             ? entry.publicKey.toBase58()
             : "",
         gateId:
-          account.gateId && typeof account.gateId.toBase58 === "function"
-            ? account.gateId.toBase58()
+          account.accessId && typeof account.accessId.toBase58 === "function"
+            ? account.accessId.toBase58()
+            : account.gateId && typeof account.gateId.toBase58 === "function"
+              ? account.gateId.toBase58()
             : "",
         authority:
           account.authority && typeof account.authority.toBase58 === "function"
             ? account.authority.toBase58()
             : "",
         isActive: Boolean(account.isActive),
-        totalChecks:
-          account.totalChecks && typeof account.totalChecks.toString === "function"
-            ? account.totalChecks.toString()
-            : "0",
-        successfulChecks:
-          account.successfulChecks && typeof account.successfulChecks.toString === "function"
-            ? account.successfulChecks.toString()
-            : "0"
+        totalChecks,
+        successfulChecks,
+        hasKnownStats,
+        statsLabel: hasKnownStats ? `${successfulChecks}/${totalChecks}` : "legacy/unknown"
       };
     });
 
@@ -2678,9 +3270,12 @@ export default function Page() {
   } = {}) => {
     const gateId = parsePublicKey("Selected gate", gateIdInput ?? adminForm.selectedGateId, true)!;
     const client = await getAdminClient({ readOnly: true });
-    const method = client.fetchGate as ((gate: PublicKey) => Promise<unknown>) | undefined;
+    const method = getSdkClientMethod<((gate: PublicKey) => Promise<unknown>)>(client, [
+      "fetchAccess",
+      "fetchGate"
+    ]);
 
-    const [gatePda] = await findGatePda(gateId, GPASS_PROGRAM_ID);
+    let [gatePda] = await findPrimaryAccessPda(gateId, GPASS_PROGRAM_ID);
     let gate: unknown = null;
     let primaryError: Error | undefined;
 
@@ -2693,8 +3288,29 @@ export default function Page() {
     }
 
     if (!gate) {
+      if (connection) {
+        try {
+          const rawMatches = await connection.getProgramAccounts(GPASS_PROGRAM_ID, {
+            filters: [{ memcmp: { offset: 9, bytes: gateId.toBase58() } }]
+          });
+          const rawEntry = rawMatches.find((entry) => Boolean(decodeAccessLikeAccountData(entry.account.data)));
+          if (rawEntry) {
+            gate = decodeAccessLikeAccountData(rawEntry.account.data);
+            gatePda = rawEntry.pubkey;
+          }
+        } catch {
+          // Ignore raw fallback failures.
+        }
+      }
+    }
+
+    if (!gate) {
       const clientAny = client as Record<string, any>;
-      const gateAccountClient = clientAny.program?.account?.Gate ?? clientAny.program?.account?.gate;
+      const gateAccountClient =
+        clientAny.program?.account?.Access ??
+        clientAny.program?.account?.access ??
+        clientAny.program?.account?.Gate ??
+        clientAny.program?.account?.gate;
       const fetchNullable =
         gateAccountClient?.fetchNullable as ((address: PublicKey) => Promise<unknown>) | undefined;
       const fetchStrict = gateAccountClient?.fetch as ((address: PublicKey) => Promise<unknown>) | undefined;
@@ -2720,6 +3336,7 @@ export default function Page() {
         sdkError: primaryError?.message
       };
       setAdminGateDetails(detailPayload);
+      updateAdminForm("metadataUri", "");
       if (showSuccessToast) {
         notify("Gate not found on this network/RPC.", "info");
       }
@@ -2731,6 +3348,7 @@ export default function Page() {
       gatePda: gatePda.toBase58()
     }) as Record<string, unknown>;
     setAdminGateDetails(display);
+    updateAdminForm("metadataUri", typeof display.metadataUri === "string" ? display.metadataUri : "");
     if (typeof display.isActive === "boolean") {
       updateAdminForm("setActiveValue", display.isActive);
     }
@@ -2802,20 +3420,26 @@ export default function Page() {
   const handleSetGateActive = async () => {
     setAdminBusy("setActive");
     try {
-      if (!isSelectedGateAuthority) {
-        throw new Error("Connected wallet is not the authority for this selected gate.");
+      if (!canAttemptSelectedGateWrite) {
+        throw new Error(
+          selectedGateAuthority
+            ? `Connected wallet is not the authority for this selected gate (expected ${selectedGateAuthority}).`
+            : "Connect wallet and select a gate before running admin actions."
+        );
       }
       const gateId = parsePublicKey("Selected gate", adminForm.selectedGateId, true)!;
       const client = await getAdminClient();
-      const method = client.setGateActive as
+      const method = getSdkClientMethod<
         | ((params: { gateId: PublicKey; isActive: boolean }) => Promise<unknown>)
-        | undefined;
+        | ((params: { accessId: PublicKey; isActive: boolean }) => Promise<unknown>)
+      >(client, ["setAccessActive", "setGateActive"]);
 
-      if (typeof method !== "function") {
-        throw new Error("SDK client is missing setGateActive.");
+      if (!method) {
+        throw new Error("SDK client is missing setAccessActive/setGateActive.");
       }
 
       const result = await method.call(client, {
+        accessId: gateId,
         gateId,
         isActive: adminForm.setActiveValue
       });
@@ -2843,21 +3467,26 @@ export default function Page() {
   const handleSetGateAuthority = async () => {
     setAdminBusy("setAuthority");
     try {
-      if (!isSelectedGateAuthority) {
-        throw new Error("Connected wallet is not the authority for this selected gate.");
+      if (!canAttemptSelectedGateWrite) {
+        throw new Error(
+          selectedGateAuthority
+            ? `Connected wallet is not the authority for this selected gate (expected ${selectedGateAuthority}).`
+            : "Connect wallet and select a gate before running admin actions."
+        );
       }
       const gateId = parsePublicKey("Selected gate", adminForm.selectedGateId, true)!;
       const newAuthority = parsePublicKey("New authority", adminForm.newAuthority, true)!;
       const client = await getAdminClient();
-      const method = client.setGateAuthority as
+      const method = getSdkClientMethod<
         | ((params: { gateId: PublicKey; newAuthority: PublicKey }) => Promise<unknown>)
-        | undefined;
+        | ((params: { accessId: PublicKey; newAuthority: PublicKey }) => Promise<unknown>)
+      >(client, ["setAccessAuthority", "setGateAuthority"]);
 
-      if (typeof method !== "function") {
-        throw new Error("SDK client is missing setGateAuthority.");
+      if (!method) {
+        throw new Error("SDK client is missing setAccessAuthority/setGateAuthority.");
       }
 
-      const result = await method.call(client, { gateId, newAuthority });
+      const result = await method.call(client, { accessId: gateId, gateId, newAuthority });
       const signature = extractSignature(result);
       appendActivity({
         label: "Set Gate Authority",
@@ -2882,20 +3511,26 @@ export default function Page() {
   const handleUpdateGateCriteria = async () => {
     setAdminBusy("updateCriteria");
     try {
-      if (!isSelectedGateAuthority) {
-        throw new Error("Connected wallet is not the authority for this selected gate.");
+      if (!canAttemptSelectedGateWrite) {
+        throw new Error(
+          selectedGateAuthority
+            ? `Connected wallet is not the authority for this selected gate (expected ${selectedGateAuthority}).`
+            : "Connect wallet and select a gate before running admin actions."
+        );
       }
       const gateId = parsePublicKey("Selected gate", adminForm.selectedGateId, true)!;
       const client = await getAdminClient();
-      const method = client.updateGateCriteria as
+      const method = getSdkClientMethod<
         | ((params: { gateId: PublicKey; newCriteria: unknown }) => Promise<unknown>)
-        | undefined;
+        | ((params: { accessId: PublicKey; newCriteria: unknown }) => Promise<unknown>)
+      >(client, ["updateAccessCriteria", "updateGateCriteria"]);
 
-      if (typeof method !== "function") {
-        throw new Error("SDK client is missing updateGateCriteria.");
+      if (!method) {
+        throw new Error("SDK client is missing updateAccessCriteria/updateGateCriteria.");
       }
 
       const result = await method.call(client, {
+        accessId: gateId,
         gateId,
         newCriteria: buildCriteria()
       });
@@ -2919,6 +3554,49 @@ export default function Page() {
     }
   };
 
+  const handleUpdateMetadataUri = async () => {
+    setAdminBusy("updateMetadataUri");
+    try {
+      if (!canAttemptSelectedGateWrite) {
+        throw new Error(
+          selectedGateAuthority
+            ? `Connected wallet is not the authority for this selected gate (expected ${selectedGateAuthority}).`
+            : "Connect wallet and select a gate before running admin actions."
+        );
+      }
+      const gateId = parsePublicKey("Selected gate", adminForm.selectedGateId, true)!;
+      const newMetadataUri = adminForm.metadataUri.trim();
+      const client = await getAdminClient();
+      const method = getSdkClientMethod<
+        (params: { accessId: PublicKey; newMetadataUri: string }) => Promise<unknown>
+      >(client, ["updateMetadataUri"]);
+
+      if (!method) {
+        throw new Error("SDK client is missing updateMetadataUri.");
+      }
+
+      const result = await method.call(client, {
+        accessId: gateId,
+        newMetadataUri
+      });
+      const signature = extractSignature(result);
+      appendActivity({
+        label: "Update Metadata URI",
+        message: "Metadata URI updated.",
+        signature
+      });
+      notify(
+        signature ? `Metadata URI updated. Signature: ${signature}` : "Metadata URI updated.",
+        "success"
+      );
+      await fetchGateDetails({ gateIdInput: gateId.toBase58(), showSuccessToast: false });
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Failed to update metadata URI.", "error");
+    } finally {
+      setAdminBusy("");
+    }
+  };
+
   const handleGateBuilderSubmit = async () => {
     if (isEditMode) {
       if (!editorGateId) {
@@ -2934,21 +3612,128 @@ export default function Page() {
   const handleCloseGate = async () => {
     setAdminBusy("closeGate");
     try {
-      if (!isSelectedGateAuthority) {
-        throw new Error("Connected wallet is not the authority for this selected gate.");
+      if (!canAttemptSelectedGateWrite) {
+        throw new Error(
+          selectedGateAuthority
+            ? `Connected wallet is not the authority for this selected gate (expected ${selectedGateAuthority}).`
+            : "Connect wallet and select a gate before running admin actions."
+        );
       }
       const gateId = parsePublicKey("Selected gate", adminForm.selectedGateId, true)!;
       const recipient = parsePublicKey("Close recipient", adminForm.closeRecipient, false);
       const client = await getAdminClient();
-      const method = client.closeGate as
-        | ((params: { gateId: PublicKey; recipient?: PublicKey }) => Promise<unknown>)
-        | undefined;
+      const closeErrors: string[] = [];
+      let result: unknown;
+      let closeSucceeded = false;
 
-      if (typeof method !== "function") {
-        throw new Error("SDK client is missing closeGate.");
+      const closeAttempts: Array<{ label: string; run: () => Promise<unknown> }> = [];
+      const closeAccessMethod = getSdkClientMethod<
+        ((params: { accessId: PublicKey; recipient?: PublicKey | null }) => Promise<unknown>)
+      >(client, ["closeAccess"]);
+      if (closeAccessMethod) {
+        closeAttempts.push({
+          label: "sdk.closeAccess",
+          run: () => closeAccessMethod.call(client, { accessId: gateId, recipient })
+        });
+      }
+      const closeGateMethod = getSdkClientMethod<
+        ((params: { gateId: PublicKey; recipient?: PublicKey | null }) => Promise<unknown>)
+      >(client, ["closeGate"]);
+      if (closeGateMethod) {
+        closeAttempts.push({
+          label: "sdk.closeGate",
+          run: () => closeGateMethod.call(client, { gateId, recipient })
+        });
       }
 
-      const result = await method.call(client, { gateId, recipient });
+      for (const attempt of closeAttempts) {
+        try {
+          result = await attempt.run();
+          closeSucceeded = true;
+          break;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          closeErrors.push(`${attempt.label}: ${message}`);
+        }
+      }
+
+      if (!closeSucceeded) {
+        const clientAny = client as Record<string, any>;
+        const program = clientAny.program as
+          | {
+              methods?: Record<string, (...args: unknown[]) => any>;
+              provider?: { wallet?: { publicKey?: PublicKey } };
+            }
+          | undefined;
+
+        const providerAuthority = program?.provider?.wallet?.publicKey ?? wallet.publicKey ?? null;
+        if (program?.methods && providerAuthority) {
+          const programMethods = program.methods;
+          const [accessPda] = PublicKey.findProgramAddressSync(
+            [Buffer.from("access"), gateId.toBuffer()],
+            GPASS_PROGRAM_ID
+          );
+          const [legacyGatePda] = PublicKey.findProgramAddressSync(
+            [Buffer.from("gate"), gateId.toBuffer()],
+            GPASS_PROGRAM_ID
+          );
+
+          const directAttempts: Array<{ label: string; run: () => Promise<unknown> }> = [];
+          if (typeof programMethods.closeAccess === "function") {
+            directAttempts.push({
+              label: "program.methods.closeAccess",
+              run: () =>
+                programMethods
+                  .closeAccess(gateId)
+                  .accounts({
+                    access: accessPda,
+                    authority: providerAuthority,
+                    recipient: recipient ?? providerAuthority
+                  })
+                  .rpc()
+            });
+          }
+          if (typeof programMethods.closeGate === "function") {
+            directAttempts.push({
+              label: "program.methods.closeGate",
+              run: () =>
+                programMethods
+                  .closeGate(gateId)
+                  .accounts({
+                    gate: legacyGatePda,
+                    authority: providerAuthority,
+                    recipient: recipient ?? providerAuthority
+                  })
+                  .rpc()
+            });
+          }
+
+          for (const attempt of directAttempts) {
+            try {
+              result = await attempt.run();
+              closeSucceeded = true;
+              break;
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              closeErrors.push(`${attempt.label}: ${message}`);
+            }
+          }
+        }
+      }
+
+      if (!closeSucceeded) {
+        const gateStillExists = await fetchGateRecordById(gateId);
+        if (!gateStillExists) {
+          notify("Gate account appears already closed on this network.", "info");
+          await loadGatesByAuthority({ showSuccessToast: false });
+          return;
+        }
+        throw new Error(
+          closeErrors.length > 0
+            ? `Close Gate failed. Attempts: ${closeErrors.join(" | ")}`
+            : "Close Gate failed. No compatible close method found."
+        );
+      }
       const signature = extractSignature(result);
       appendActivity({
         label: "Close Gate",
@@ -2967,22 +3752,27 @@ export default function Page() {
   const handleCloseCheckRecord = async () => {
     setAdminBusy("closeRecord");
     try {
-      if (!isSelectedGateAuthority) {
-        throw new Error("Connected wallet is not the authority for this selected gate.");
+      if (!canAttemptSelectedGateWrite) {
+        throw new Error(
+          selectedGateAuthority
+            ? `Connected wallet is not the authority for this selected gate (expected ${selectedGateAuthority}).`
+            : "Connect wallet and select a gate before running admin actions."
+        );
       }
       const gateId = parsePublicKey("Selected gate", adminForm.selectedGateId, true)!;
       const user = parsePublicKey("Check record user", adminForm.closeRecordUser, true)!;
       const recipient = parsePublicKey("Close recipient", adminForm.closeRecipient, false);
       const client = await getAdminClient();
-      const method = client.closeCheckRecord as
+      const method = getSdkClientMethod<
         | ((params: { gateId: PublicKey; user: PublicKey; recipient?: PublicKey }) => Promise<unknown>)
-        | undefined;
+        | ((params: { accessId: PublicKey; user: PublicKey; recipient?: PublicKey }) => Promise<unknown>)
+      >(client, ["closeAccessCheckRecord", "closeCheckRecord"]);
 
-      if (typeof method !== "function") {
-        throw new Error("SDK client is missing closeCheckRecord.");
+      if (!method) {
+        throw new Error("SDK client is missing closeAccessCheckRecord/closeCheckRecord.");
       }
 
-      const result = await method.call(client, { gateId, user, recipient });
+      const result = await method.call(client, { accessId: gateId, gateId, user, recipient });
       const signature = extractSignature(result);
       appendActivity({
         label: "Close Check Record",
@@ -3305,6 +4095,311 @@ export default function Page() {
                     </Grid>
 
                     <Paper variant="outlined" sx={{ p: 2 }}>
+                      <Stack spacing={1.4}>
+                        <Typography variant="subtitle2">Metadata URI (Optional)</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          Store branding/integration manifest via URI. Use Irys upload to generate a JSON manifest.
+                        </Typography>
+                        <TextField
+                          fullWidth
+                          label="Metadata URI"
+                          value={createForm.metadataUri}
+                          onChange={(event) => updateCreateForm("metadataUri", event.target.value)}
+                          disabled={isEditMode}
+                          placeholder="https://gateway.irys.xyz/<id>"
+                          helperText={
+                            isEditMode
+                              ? "Edit mode updates criteria only. Use Admin Console for metadata URI updates."
+                              : "Saved on-chain during initialize access. Supports irys:// and https:// URIs."
+                          }
+                        />
+                        <Grid container spacing={1.2}>
+                          <Grid size={{ xs: 12, sm: 6 }}>
+                            <TextField
+                              fullWidth
+                              label="Brand Name"
+                              value={createForm.metadataName}
+                              onChange={(event) => updateCreateForm("metadataName", event.target.value)}
+                              disabled={isEditMode}
+                            />
+                          </Grid>
+                          <Grid size={{ xs: 12, sm: 6 }}>
+                            <TextField
+                              fullWidth
+                              label="Brand Subtitle"
+                              value={createForm.metadataSubtitle}
+                              onChange={(event) => updateCreateForm("metadataSubtitle", event.target.value)}
+                              disabled={isEditMode}
+                            />
+                          </Grid>
+                          <Grid size={{ xs: 12 }}>
+                            <TextField
+                              fullWidth
+                              label="Description"
+                              value={createForm.metadataDescription}
+                              onChange={(event) => updateCreateForm("metadataDescription", event.target.value)}
+                              disabled={isEditMode}
+                            />
+                          </Grid>
+                          <Grid size={{ xs: 12, sm: 6 }}>
+                            <Stack spacing={1}>
+                              <TextField
+                                fullWidth
+                                label="Logo URI"
+                                value={createForm.metadataLogoUri}
+                                onChange={(event) => updateCreateForm("metadataLogoUri", event.target.value)}
+                                disabled={isEditMode}
+                              />
+                              <Button
+                                variant="outlined"
+                                size="small"
+                                onClick={() => logoFileInputRef.current?.click()}
+                                disabled={isEditMode || logoUploadBusy}
+                              >
+                                {logoUploadBusy ? "Uploading Logo..." : "Upload Logo Image"}
+                              </Button>
+                            </Stack>
+                          </Grid>
+                          <Grid size={{ xs: 12, sm: 6 }}>
+                            <Stack spacing={1}>
+                              <TextField
+                                fullWidth
+                                label="Banner URI"
+                                value={createForm.metadataBannerUri}
+                                onChange={(event) => updateCreateForm("metadataBannerUri", event.target.value)}
+                                disabled={isEditMode}
+                              />
+                              <Button
+                                variant="outlined"
+                                size="small"
+                                onClick={() => bannerFileInputRef.current?.click()}
+                                disabled={isEditMode || bannerUploadBusy}
+                              >
+                                {bannerUploadBusy ? "Uploading Banner..." : "Upload Banner Image"}
+                              </Button>
+                            </Stack>
+                          </Grid>
+                          <Grid size={{ xs: 12, sm: 4 }}>
+                            <TextField
+                              fullWidth
+                              label="Accent Color"
+                              value={createForm.metadataAccent}
+                              onChange={(event) => updateCreateForm("metadataAccent", event.target.value)}
+                              disabled={isEditMode}
+                              placeholder="#6db8ff"
+                            />
+                          </Grid>
+                          <Grid size={{ xs: 12, sm: 4 }}>
+                            <TextField
+                              fullWidth
+                              label="Support Label"
+                              value={createForm.metadataSupportLabel}
+                              onChange={(event) =>
+                                updateCreateForm("metadataSupportLabel", event.target.value)
+                              }
+                              disabled={isEditMode}
+                            />
+                          </Grid>
+                          <Grid size={{ xs: 12, sm: 4 }}>
+                            <TextField
+                              fullWidth
+                              label="Support URL"
+                              value={createForm.metadataSupportUrl}
+                              onChange={(event) => updateCreateForm("metadataSupportUrl", event.target.value)}
+                              disabled={isEditMode}
+                            />
+                          </Grid>
+                          <Grid size={{ xs: 12 }}>
+                            <Divider sx={{ my: 0.4 }} />
+                            <Typography variant="caption" color="text.secondary">
+                              Integrations (optional)
+                            </Typography>
+                          </Grid>
+                          <Grid size={{ xs: 12, sm: 4 }}>
+                            <TextField
+                              fullWidth
+                              label="Discord Guild ID"
+                              value={createForm.metadataDiscordGuildId}
+                              onChange={(event) =>
+                                updateCreateForm("metadataDiscordGuildId", event.target.value)
+                              }
+                              disabled={isEditMode}
+                            />
+                          </Grid>
+                          <Grid size={{ xs: 12, sm: 4 }}>
+                            <TextField
+                              fullWidth
+                              label="Discord Pass Role ID"
+                              value={createForm.metadataDiscordPassRoleId}
+                              onChange={(event) =>
+                                updateCreateForm("metadataDiscordPassRoleId", event.target.value)
+                              }
+                              disabled={isEditMode}
+                            />
+                          </Grid>
+                          <Grid size={{ xs: 12, sm: 4 }}>
+                            <TextField
+                              fullWidth
+                              label="Discord Fail Action"
+                              value={createForm.metadataDiscordFailAction}
+                              onChange={(event) =>
+                                updateCreateForm("metadataDiscordFailAction", event.target.value)
+                              }
+                              disabled={isEditMode}
+                              placeholder="remove_role"
+                            />
+                          </Grid>
+                          <Grid size={{ xs: 12, sm: 6 }}>
+                            <TextField
+                              fullWidth
+                              label="Telegram Chat ID"
+                              value={createForm.metadataTelegramChatId}
+                              onChange={(event) =>
+                                updateCreateForm("metadataTelegramChatId", event.target.value)
+                              }
+                              disabled={isEditMode}
+                            />
+                          </Grid>
+                          <Grid size={{ xs: 12, sm: 6 }}>
+                            <TextField
+                              fullWidth
+                              label="Telegram Pass Entitlement"
+                              value={createForm.metadataTelegramPassEntitlement}
+                              onChange={(event) =>
+                                updateCreateForm("metadataTelegramPassEntitlement", event.target.value)
+                              }
+                              disabled={isEditMode}
+                              placeholder="member"
+                            />
+                          </Grid>
+                          <Grid size={{ xs: 12 }}>
+                            <Divider sx={{ my: 0.4 }} />
+                            <Typography variant="caption" color="text.secondary">
+                              Revalidation + links
+                            </Typography>
+                          </Grid>
+                          <Grid size={{ xs: 12, sm: 4 }}>
+                            <TextField
+                              fullWidth
+                              label="Revalidation Interval Seconds"
+                              value={createForm.metadataRevalidationIntervalSeconds}
+                              onChange={(event) =>
+                                updateCreateForm(
+                                  "metadataRevalidationIntervalSeconds",
+                                  event.target.value
+                                )
+                              }
+                              disabled={isEditMode}
+                              placeholder="3600"
+                            />
+                          </Grid>
+                          <Grid size={{ xs: 12, sm: 4 }}>
+                            <TextField
+                              fullWidth
+                              label="Revalidation Lease Seconds"
+                              value={createForm.metadataRevalidationLeaseSeconds}
+                              onChange={(event) =>
+                                updateCreateForm("metadataRevalidationLeaseSeconds", event.target.value)
+                              }
+                              disabled={isEditMode}
+                              placeholder="86400"
+                            />
+                          </Grid>
+                          <Grid size={{ xs: 12, sm: 4 }}>
+                            <TextField
+                              fullWidth
+                              label="Verify URL"
+                              value={createForm.metadataVerifyUrl}
+                              onChange={(event) => updateCreateForm("metadataVerifyUrl", event.target.value)}
+                              disabled={isEditMode}
+                              placeholder="https://access.governance.so/access?gateId=..."
+                            />
+                          </Grid>
+                        </Grid>
+                        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
+                          <Button
+                            variant="outlined"
+                            onClick={handleUploadMetadataToIrys}
+                            disabled={isEditMode || metadataUploadBusy}
+                          >
+                            {metadataUploadBusy ? "Uploading..." : "Upload Metadata JSON To Irys"}
+                          </Button>
+                          <Button
+                            variant="outlined"
+                            onClick={() => void copyText(JSON.stringify(createMetadataManifestPreview, null, 2))}
+                          >
+                            Copy Metadata JSON
+                          </Button>
+                        </Stack>
+                        {(createForm.metadataLogoUri || createForm.metadataBannerUri) && (
+                          <Stack spacing={1}>
+                            {createForm.metadataLogoUri && (
+                              <Box
+                                component="img"
+                                src={resolveMetadataHttpUri(createForm.metadataLogoUri)}
+                                alt="Logo preview"
+                                sx={{
+                                  width: 72,
+                                  height: 72,
+                                  objectFit: "cover",
+                                  borderRadius: 1.2,
+                                  border: "1px solid rgba(109, 184, 255, 0.24)"
+                                }}
+                              />
+                            )}
+                            {createForm.metadataBannerUri && (
+                              <Box
+                                component="img"
+                                src={resolveMetadataHttpUri(createForm.metadataBannerUri)}
+                                alt="Banner preview"
+                                sx={{
+                                  width: "100%",
+                                  maxWidth: 360,
+                                  height: 84,
+                                  objectFit: "cover",
+                                  borderRadius: 1.2,
+                                  border: "1px solid rgba(109, 184, 255, 0.24)"
+                                }}
+                              />
+                            )}
+                          </Stack>
+                        )}
+                        {hasMetadataManifestDraft && (
+                          <Typography
+                            component="pre"
+                            className="mono"
+                            sx={{
+                              m: 0,
+                              p: 1.2,
+                              fontSize: "0.72rem",
+                              maxHeight: 160,
+                              overflow: "auto",
+                              borderRadius: 1,
+                              backgroundColor: "rgba(10, 16, 30, 0.92)",
+                              border: "1px solid rgba(109, 184, 255, 0.24)"
+                            }}
+                          >
+                            {JSON.stringify(createMetadataManifestPreview, null, 2)}
+                          </Typography>
+                        )}
+                        <input
+                          ref={logoFileInputRef}
+                          type="file"
+                          accept="image/*"
+                          style={{ display: "none" }}
+                          onChange={handleLogoFileSelected}
+                        />
+                        <input
+                          ref={bannerFileInputRef}
+                          type="file"
+                          accept="image/*"
+                          style={{ display: "none" }}
+                          onChange={handleBannerFileSelected}
+                        />
+                      </Stack>
+                    </Paper>
+
+                    <Paper variant="outlined" sx={{ p: 2 }}>
                       <Typography variant="subtitle2" sx={{ mb: 1 }}>
                         Verification platforms
                       </Typography>
@@ -3415,12 +4510,12 @@ export default function Page() {
                           <Grid size={{ xs: 12 }}>
                             <TextField
                               fullWidth
-                              label="Required Gates (comma-separated public keys)"
+                              label="Required Access Spaces (comma-separated public keys)"
                               value={createForm.requiredGates}
                               onChange={(event) =>
                                 updateCreateForm("requiredGates", event.target.value)
                               }
-                              helperText="Gate IDs to combine in this meta-gate."
+                              helperText="Access IDs to combine in this meta-access rule."
                             />
                           </Grid>
                           <Grid size={{ xs: 12 }}>
@@ -3605,10 +4700,11 @@ export default function Page() {
                         onClick={handleGateBuilderSubmit}
                         disabled={
                           createBusy ||
+                          metadataUploadBusy ||
                           adminBusy === "updateCriteria" ||
                           !isWalletConnected ||
                           !connection ||
-                          (isEditMode && (!editorGateId || !isSelectedGateAuthority))
+                          (isEditMode && (!editorGateId || !canAttemptSelectedGateWrite))
                         }
                         startIcon={
                           createBusy || adminBusy === "updateCriteria" ? (
@@ -3627,9 +4723,10 @@ export default function Page() {
                             : "Initialize Gate"}
                       </Button>
                     </Stack>
-                    {isEditMode && !isSelectedGateAuthority && (
+                    {isEditMode && isWalletConnected && selectedGateAuthority && !isSelectedGateAuthority && (
                       <Alert severity="warning">
-                        Connected wallet is not the authority for this selected gate.
+                        Connected wallet is not the authority for this selected gate (expected{" "}
+                        <span className="mono">{selectedGateAuthority}</span>).
                       </Alert>
                     )}
                     {!isWalletConnected && (
@@ -4092,7 +5189,7 @@ export default function Page() {
                                 {gate.gateId.slice(0, 8)}...{gate.gateId.slice(-6)}
                               </Box>
                               <Box component="span" sx={{ fontSize: "0.72rem" }}>
-                                {gate.successfulChecks}/{gate.totalChecks}
+                                {gate.statsLabel}
                               </Box>
                             </Button>
                             <Tooltip title="Copy member link">
@@ -4117,11 +5214,11 @@ export default function Page() {
                         You can load/fetch gates in read-only mode. Connect wallet only for write actions.
                       </Alert>
                     )}
-                    {isWalletConnected && selectedAdminGate && !isSelectedGateAuthority && (
+                    {isWalletConnected && selectedGateAuthority && !isSelectedGateAuthority && (
                       <Alert severity="warning">
                         Connected wallet is not the authority for this gate. Switch to{" "}
                         <Box component="span" className="mono">
-                          {selectedAdminGate.authority}
+                          {selectedGateAuthority}
                         </Box>{" "}
                         to perform write actions.
                       </Alert>
@@ -4202,7 +5299,7 @@ export default function Page() {
                           adminBusy !== "" ||
                           !adminForm.selectedGateId ||
                           !isWalletConnected ||
-                          !isSelectedGateAuthority
+                          !canAttemptSelectedGateWrite
                         }
                       >
                         {adminBusy === "updateCriteria"
@@ -4213,6 +5310,28 @@ export default function Page() {
                     <Typography variant="caption" color="text.secondary">
                       Use "Load Into Editor" to prefill Gate Builder fields, then update criteria from this panel.
                     </Typography>
+
+                    <TextField
+                      fullWidth
+                      label="Metadata URI"
+                      value={adminForm.metadataUri}
+                      onChange={(event) => updateAdminForm("metadataUri", event.target.value)}
+                      helperText="Update on-chain metadata URI for this gate/access."
+                    />
+                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
+                      <Button
+                        variant="outlined"
+                        onClick={handleUpdateMetadataUri}
+                        disabled={
+                          adminBusy !== "" ||
+                          !adminForm.selectedGateId ||
+                          !isWalletConnected ||
+                          !canAttemptSelectedGateWrite
+                        }
+                      >
+                        {adminBusy === "updateMetadataUri" ? "Updating..." : "Update Metadata URI"}
+                      </Button>
+                    </Stack>
 
                     <Paper variant="outlined" sx={{ p: 2 }}>
                       <Stack spacing={2}>
@@ -4235,7 +5354,7 @@ export default function Page() {
                               adminBusy !== "" ||
                               !adminForm.selectedGateId ||
                               !isWalletConnected ||
-                              !isSelectedGateAuthority
+                              !canAttemptSelectedGateWrite
                             }
                           >
                             {adminBusy === "setActive" ? "Applying..." : "Apply Active State"}
@@ -4257,7 +5376,7 @@ export default function Page() {
                             !adminForm.selectedGateId ||
                             !adminForm.newAuthority ||
                             !isWalletConnected ||
-                            !isSelectedGateAuthority
+                            !canAttemptSelectedGateWrite
                           }
                         >
                           {adminBusy === "setAuthority" ? "Transferring..." : "Set New Authority"}
@@ -4291,7 +5410,7 @@ export default function Page() {
                               !adminForm.selectedGateId ||
                               !adminForm.closeRecordUser ||
                               !isWalletConnected ||
-                              !isSelectedGateAuthority
+                              !canAttemptSelectedGateWrite
                             }
                           >
                             {adminBusy === "closeRecord" ? "Closing..." : "Close Check Record"}
@@ -4304,7 +5423,7 @@ export default function Page() {
                               adminBusy !== "" ||
                               !adminForm.selectedGateId ||
                               !isWalletConnected ||
-                              !isSelectedGateAuthority
+                              !canAttemptSelectedGateWrite
                             }
                           >
                             {adminBusy === "closeGate" ? "Closing..." : "Close Gate"}
