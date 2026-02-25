@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
 import ErrorOutlineRoundedIcon from "@mui/icons-material/ErrorOutlineRounded";
@@ -86,6 +86,7 @@ interface IdentityDebugState {
 }
 
 type ClusterKind = "devnet" | "testnet" | "mainnet-beta" | "custom";
+type AccessViewMode = "simple" | "advanced";
 
 interface CommunityAction {
   label: string;
@@ -1553,6 +1554,8 @@ export default function AccessPage() {
 
   const [cluster, setCluster] = useState<ClusterKind>(DEFAULT_CLUSTER);
   const [customRpc, setCustomRpc] = useState("");
+  const [accessViewMode, setAccessViewMode] = useState<AccessViewMode>("simple");
+  const autoDeriveKeyRef = useRef("");
 
   const [memberForm, setMemberForm] = useState<MemberFormState>(defaultMemberForm);
   const [memberCheck, setMemberCheck] = useState<MemberCheckState>({
@@ -1598,6 +1601,11 @@ export default function AccessPage() {
       return;
     }
 
+    const persistedViewMode = window.localStorage.getItem("grape_access_view_mode");
+    if (persistedViewMode === "simple" || persistedViewMode === "advanced") {
+      setAccessViewMode(persistedViewMode);
+    }
+
     const persistedCluster = window.localStorage.getItem("grape_access_cluster");
     const persistedCustomRpc = window.localStorage.getItem("grape_access_custom_rpc") ?? "";
     if (
@@ -1637,6 +1645,13 @@ export default function AccessPage() {
       setCustomRpc(rpcFromQuery);
     }
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem("grape_access_view_mode", accessViewMode);
+  }, [accessViewMode]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1692,6 +1707,7 @@ export default function AccessPage() {
     }
     return 2;
   }, [isWalletConnected, gateContext.status]);
+  const isAdvancedMode = accessViewMode === "advanced";
 
   const notify = (message: string, severity: "success" | "error" | "info") => {
     setSnackbarMessage(message);
@@ -1857,7 +1873,7 @@ export default function AccessPage() {
       setGateContext({
         status: "ready",
         gateId: gateId.toBase58(),
-        message: `Gate loaded (RPC slot ${probeSlot}). You can now auto-derive accounts and run checks.`,
+        message: `Gate loaded (RPC slot ${probeSlot}). Required accounts are auto-derived for access checks.`,
         criteriaVariant,
         gateTypeLabel: extractGateTypeLabel(gate.gateType),
         profile: resolveCommunityProfile(gateId.toBase58())
@@ -1929,6 +1945,7 @@ export default function AccessPage() {
     try {
       const loaded = await loadGateContext(memberForm.gateId, { silent: false });
       if (loaded) {
+        await handleAutoDeriveMemberAccounts({ silent: true, skipGateReload: true });
         notify("Gate profile loaded.", "success");
       }
     } finally {
@@ -1983,7 +2000,7 @@ export default function AccessPage() {
   }, [memberForm.gateId]);
 
   const handleAutoDeriveMemberAccounts = async (
-    { silent = false }: { silent?: boolean } = {}
+    { silent = false, skipGateReload = false }: { silent?: boolean; skipGateReload?: boolean } = {}
   ): Promise<MemberFormState | null> => {
     if (!wallet.publicKey || !connection) {
       const message = "Connect wallet and choose a valid RPC endpoint first.";
@@ -2006,7 +2023,13 @@ export default function AccessPage() {
 
     setMemberDeriveBusy(true);
     try {
-      const loaded = await loadGateContext(gateIdRaw, { silent: false });
+      const loaded =
+        skipGateReload &&
+        gateContext.status === "ready" &&
+        gateContext.criteriaVariant &&
+        gateContext.gateId === gateIdRaw
+          ? { criteriaVariant: gateContext.criteriaVariant }
+          : await loadGateContext(gateIdRaw, { silent });
       if (!loaded) {
         const message = "Unable to derive accounts until gate profile loads successfully.";
         setMemberDerive({ status: "error", message });
@@ -2432,6 +2455,34 @@ export default function AccessPage() {
     }
   };
 
+  useEffect(() => {
+    if (!isWalletConnected || !connection) {
+      return;
+    }
+    if (gateContext.status !== "ready" || !gateContext.gateId) {
+      return;
+    }
+    if (memberDeriveBusy || memberBusy || gateLoadBusy) {
+      return;
+    }
+    const key = [gateContext.gateId, rpcEndpoint, connectedWalletAddress].join(":");
+    if (autoDeriveKeyRef.current === key) {
+      return;
+    }
+    autoDeriveKeyRef.current = key;
+    void handleAutoDeriveMemberAccounts({ silent: true, skipGateReload: true });
+  }, [
+    isWalletConnected,
+    connection,
+    gateContext.status,
+    gateContext.gateId,
+    rpcEndpoint,
+    connectedWalletAddress,
+    memberDeriveBusy,
+    memberBusy,
+    gateLoadBusy
+  ]);
+
   const handleMemberCheck = async () => {
     if (!wallet.publicKey || !connection) {
       const message = "Connect wallet and choose a valid RPC endpoint first.";
@@ -2489,7 +2540,9 @@ export default function AccessPage() {
 
       const result = await Promise.resolve(method.call(client, params));
       const signature = extractSignature(result);
-      const passed = extractPassStatus(result);
+      // On-chain check_gate returns an error when the gate is not passed.
+      // So if rpc() succeeds, treat that as passed unless SDK explicitly returns false.
+      const passed = extractPassStatus(result) ?? true;
       const resultMessage =
         passed === true
           ? "Access granted for this gate."
@@ -3177,123 +3230,154 @@ export default function AccessPage() {
             </Stack>
           </Paper>
 
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
-            <Button
-              variant="outlined"
-              onClick={() => void handleAutoDeriveMemberAccounts()}
-              disabled={
-                memberDeriveBusy ||
-                linkWalletBusy ||
-                identityDebugBusy ||
-                !memberForm.gateId ||
-                !isWalletConnected ||
-                !connection
-              }
-            >
-              {memberDeriveBusy ? "Deriving..." : "Auto-Derive Accounts"}
-            </Button>
-            <Button
-              variant="outlined"
-              onClick={() => void handleLinkWalletSelf()}
-              disabled={
-                linkWalletBusy ||
-                memberDeriveBusy ||
-                identityDebugBusy ||
-                !memberForm.gateId ||
-                !isWalletConnected ||
-                !connection
-              }
-            >
-              {linkWalletBusy ? "Linking..." : "Link Wallet"}
-            </Button>
-            <Button
-              variant="outlined"
-              onClick={() => void handleDebugIdentity()}
-              disabled={
-                identityDebugBusy ||
-                memberDeriveBusy ||
-                linkWalletBusy ||
-                !memberForm.gateId ||
-                !isWalletConnected ||
-                !connection
-              }
-            >
-              {identityDebugBusy ? "Debugging..." : "Debug Identity"}
-            </Button>
-            <Button
-              variant="outlined"
-              onClick={() => void copyShareLink()}
-              disabled={!memberForm.gateId}
-              startIcon={<ContentCopyRoundedIcon />}
-            >
-              Copy Share Link
-            </Button>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2} alignItems={{ sm: "center" }}>
+            <FormControl sx={{ minWidth: 220 }}>
+              <InputLabel>Access Mode</InputLabel>
+              <Select
+                label="Access Mode"
+                value={accessViewMode}
+                onChange={(event) => setAccessViewMode(event.target.value as AccessViewMode)}
+              >
+                <MenuItem value="simple">Simple</MenuItem>
+                <MenuItem value="advanced">Advanced</MenuItem>
+              </Select>
+            </FormControl>
+            {!isAdvancedMode && (
+              <Typography sx={{ color: "text.secondary", fontSize: "0.88rem" }}>
+                Accounts auto-derive after gate load.
+              </Typography>
+            )}
           </Stack>
 
-          <Alert severity={memberDerive.status === "error" ? "error" : "info"}>
-            {memberDerive.message}
-          </Alert>
-          {identityDebug.status !== "idle" && (
-            <Paper
-              variant="outlined"
-              sx={{ p: 1.5, borderColor: "rgba(109, 184, 255, 0.24)", backgroundColor: "rgba(6, 14, 24, 0.5)" }}
-            >
-              <Typography variant="subtitle2" sx={{ mb: 0.8 }}>
-                Identity Debug
-              </Typography>
-              <Alert severity={identityDebug.status === "error" ? "error" : "info"} sx={{ mb: 1 }}>
-                {identityDebug.message}
+          {isAdvancedMode && (
+            <>
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
+                <Button
+                  variant="outlined"
+                  onClick={() => void handleAutoDeriveMemberAccounts()}
+                  disabled={
+                    memberDeriveBusy ||
+                    linkWalletBusy ||
+                    identityDebugBusy ||
+                    !memberForm.gateId ||
+                    !isWalletConnected ||
+                    !connection
+                  }
+                >
+                  {memberDeriveBusy ? "Deriving..." : "Auto-Derive Accounts"}
+                </Button>
+                <Button
+                  variant="outlined"
+                  onClick={() => void handleLinkWalletSelf()}
+                  disabled={
+                    linkWalletBusy ||
+                    memberDeriveBusy ||
+                    identityDebugBusy ||
+                    !memberForm.gateId ||
+                    !isWalletConnected ||
+                    !connection
+                  }
+                >
+                  {linkWalletBusy ? "Linking..." : "Link Wallet"}
+                </Button>
+                <Button
+                  variant="outlined"
+                  onClick={() => void handleDebugIdentity()}
+                  disabled={
+                    identityDebugBusy ||
+                    memberDeriveBusy ||
+                    linkWalletBusy ||
+                    !memberForm.gateId ||
+                    !isWalletConnected ||
+                    !connection
+                  }
+                >
+                  {identityDebugBusy ? "Debugging..." : "Debug Identity"}
+                </Button>
+                <Button
+                  variant="outlined"
+                  onClick={() => void copyShareLink()}
+                  disabled={!memberForm.gateId}
+                  startIcon={<ContentCopyRoundedIcon />}
+                >
+                  Copy Share Link
+                </Button>
+              </Stack>
+
+              <Alert severity={memberDerive.status === "error" ? "error" : "info"}>
+                {memberDerive.message}
               </Alert>
-              {identityDebug.lines.length > 0 && (
-                <Typography
-                  component="pre"
+              {identityDebug.status !== "idle" && (
+                <Paper
+                  variant="outlined"
                   sx={{
-                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                    fontSize: "0.78rem",
-                    lineHeight: 1.4,
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                    m: 0
+                    p: 1.5,
+                    borderColor: "rgba(109, 184, 255, 0.24)",
+                    backgroundColor: "rgba(6, 14, 24, 0.5)"
                   }}
                 >
-                  {identityDebug.lines.join("\n")}
-                </Typography>
+                  <Typography variant="subtitle2" sx={{ mb: 0.8 }}>
+                    Identity Debug
+                  </Typography>
+                  <Alert severity={identityDebug.status === "error" ? "error" : "info"} sx={{ mb: 1 }}>
+                    {identityDebug.message}
+                  </Alert>
+                  {identityDebug.lines.length > 0 && (
+                    <Typography
+                      component="pre"
+                      sx={{
+                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                        fontSize: "0.78rem",
+                        lineHeight: 1.4,
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                        m: 0
+                      }}
+                    >
+                      {identityDebug.lines.join("\n")}
+                    </Typography>
+                  )}
+                </Paper>
               )}
-            </Paper>
+
+              <TextField
+                fullWidth
+                label="Identity Value (optional)"
+                value={memberForm.identityValue}
+                onChange={(event) => updateMemberForm("identityValue", event.target.value)}
+                helperText="Enter exact platform ID/handle used in verification. If it starts with @, both with and without @ are tried."
+              />
+              <TextField
+                fullWidth
+                label="Reputation Account (optional)"
+                value={memberForm.reputationAccount}
+                onChange={(event) => updateMemberForm("reputationAccount", event.target.value)}
+              />
+              <TextField
+                fullWidth
+                label="Identity Account (optional)"
+                value={memberForm.identityAccount}
+                onChange={(event) => updateMemberForm("identityAccount", event.target.value)}
+                helperText="Identity PDA account (not the grapeSpace config address)."
+              />
+              <TextField
+                fullWidth
+                label="Link Account (optional)"
+                value={memberForm.linkAccount}
+                onChange={(event) => updateMemberForm("linkAccount", event.target.value)}
+              />
+              <TextField
+                fullWidth
+                label="Token Account (optional)"
+                value={memberForm.tokenAccount}
+                onChange={(event) => updateMemberForm("tokenAccount", event.target.value)}
+              />
+            </>
           )}
 
-          <TextField
-            fullWidth
-            label="Identity Value (optional)"
-            value={memberForm.identityValue}
-            onChange={(event) => updateMemberForm("identityValue", event.target.value)}
-            helperText="Enter exact platform ID/handle used in verification. If it starts with @, both with and without @ are tried."
-          />
-          <TextField
-            fullWidth
-            label="Reputation Account (optional)"
-            value={memberForm.reputationAccount}
-            onChange={(event) => updateMemberForm("reputationAccount", event.target.value)}
-          />
-          <TextField
-            fullWidth
-            label="Identity Account (optional)"
-            value={memberForm.identityAccount}
-            onChange={(event) => updateMemberForm("identityAccount", event.target.value)}
-            helperText="Identity PDA account (not the grapeSpace config address)."
-          />
-          <TextField
-            fullWidth
-            label="Link Account (optional)"
-            value={memberForm.linkAccount}
-            onChange={(event) => updateMemberForm("linkAccount", event.target.value)}
-          />
-          <TextField
-            fullWidth
-            label="Token Account (optional)"
-            value={memberForm.tokenAccount}
-            onChange={(event) => updateMemberForm("tokenAccount", event.target.value)}
-          />
+          {!isAdvancedMode && memberDerive.status === "error" && (
+            <Alert severity="error">{memberDerive.message}</Alert>
+          )}
 
           <FormControlLabel
             control={
@@ -3305,19 +3389,33 @@ export default function AccessPage() {
             label="Store my check record on-chain"
           />
 
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
-            <Button variant="outlined" onClick={() => void copyText(JSON.stringify(memberPreview, null, 2))}>
-              Copy Check Payload
-            </Button>
+          {isAdvancedMode ? (
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
+              <Button variant="outlined" onClick={() => void copyText(JSON.stringify(memberPreview, null, 2))}>
+                Copy Check Payload
+              </Button>
+              <Button
+                variant="contained"
+                onClick={handleMemberCheck}
+                disabled={memberBusy || !isWalletConnected || !connection || gateContext.status !== "ready"}
+                startIcon={memberBusy ? <CircularProgress size={16} color="inherit" /> : <ShieldRoundedIcon />}
+              >
+                {memberBusy ? "Checking..." : "Check My Access"}
+              </Button>
+            </Stack>
+          ) : (
             <Button
               variant="contained"
+              size="large"
+              fullWidth
               onClick={handleMemberCheck}
-              disabled={memberBusy || !isWalletConnected || !connection}
-              startIcon={memberBusy ? <CircularProgress size={16} color="inherit" /> : <ShieldRoundedIcon />}
+              disabled={memberBusy || !isWalletConnected || !connection || gateContext.status !== "ready"}
+              startIcon={memberBusy ? <CircularProgress size={18} color="inherit" /> : <ShieldRoundedIcon />}
+              sx={{ py: 1.25, fontSize: "1.04rem", fontWeight: 700 }}
             >
-              {memberBusy ? "Checking..." : "Check My Access"}
+              {memberBusy ? "Checking Access..." : "Check My Access"}
             </Button>
-          </Stack>
+          )}
 
           <Divider />
 
@@ -3406,34 +3504,36 @@ export default function AccessPage() {
             </Stack>
           )}
 
-          <Paper
-            variant="outlined"
-            sx={{
-              p: 2,
-              maxHeight: 300,
-              overflow: "auto",
-              backgroundColor: "rgba(10, 16, 30, 0.92)",
-              borderColor: "rgba(109, 184, 255, 0.24)"
-            }}
-          >
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>
-              Check Payload
-            </Typography>
-            <Typography component="pre" className="mono" sx={{ m: 0, fontSize: "0.78rem" }}>
-              {JSON.stringify(memberPreview, null, 2)}
-            </Typography>
-            {Boolean(memberCheck.response) && (
-              <>
-                <Divider sx={{ my: 1.2 }} />
-                <Typography variant="subtitle2" sx={{ mb: 1 }}>
-                  Response
-                </Typography>
-                <Typography component="pre" className="mono" sx={{ m: 0, fontSize: "0.74rem" }}>
-                  {JSON.stringify(memberCheck.response, null, 2)}
-                </Typography>
-              </>
-            )}
-          </Paper>
+          {isAdvancedMode && (
+            <Paper
+              variant="outlined"
+              sx={{
+                p: 2,
+                maxHeight: 300,
+                overflow: "auto",
+                backgroundColor: "rgba(10, 16, 30, 0.92)",
+                borderColor: "rgba(109, 184, 255, 0.24)"
+              }}
+            >
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                Check Payload
+              </Typography>
+              <Typography component="pre" className="mono" sx={{ m: 0, fontSize: "0.78rem" }}>
+                {JSON.stringify(memberPreview, null, 2)}
+              </Typography>
+              {Boolean(memberCheck.response) && (
+                <>
+                  <Divider sx={{ my: 1.2 }} />
+                  <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                    Response
+                  </Typography>
+                  <Typography component="pre" className="mono" sx={{ m: 0, fontSize: "0.74rem" }}>
+                    {JSON.stringify(memberCheck.response, null, 2)}
+                  </Typography>
+                </>
+              )}
+            </Paper>
+          )}
 
           <Box>
             <Button href="/" variant="text" size="small">
