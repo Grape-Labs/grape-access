@@ -54,6 +54,7 @@ import {
   SendTransactionError,
   SystemProgram,
   Transaction,
+  TransactionInstruction,
   clusterApiUrl
 } from "@solana/web3.js";
 import bs58 from "bs58";
@@ -288,6 +289,7 @@ const CHECK_INSTRUCTION_DISCRIMINATORS = new Set([
   "097d0319a9f78d68", // checkAccess
   "71f768eb3121169a" // checkGate (legacy)
 ]);
+const CHECK_RECORD_OWNER_OFFSETS = [8, 9] as const;
 
 const criteriaOptions: { value: CriteriaKind; label: string }[] = [
   { value: "combined", label: "Reputation + Verified Identity" },
@@ -820,30 +822,42 @@ function readGateCheckRecordFromRawData(
   data: Buffer | Uint8Array
 ): { gate: PublicKey; user: PublicKey; passed: boolean; checkedAt: number } | null {
   const bytes = Buffer.from(data);
-  if (bytes.length < 83 || bytes.length > 120) {
+  if (bytes.length < 82 || bytes.length > 120) {
     return null;
   }
-  const passedByte = bytes[73];
-  if (passedByte !== 0 && passedByte !== 1) {
-    return null;
-  }
-  try {
-    const gate = new PublicKey(bytes.subarray(9, 41));
-    const user = new PublicKey(bytes.subarray(41, 73));
-    const checkedAtBig = bytes.readBigInt64LE(74);
-    const maxSafe = BigInt(Number.MAX_SAFE_INTEGER);
-    const minSafe = BigInt(Number.MIN_SAFE_INTEGER);
-    const checkedAt =
-      checkedAtBig > maxSafe || checkedAtBig < minSafe ? 0 : Number(checkedAtBig);
-    return {
-      gate,
-      user,
-      passed: passedByte === 1,
-      checkedAt
-    };
-  } catch {
-    return null;
-  }
+
+  const parseAtOffset = (gateOffset: number) => {
+    const userOffset = gateOffset + 32;
+    const passedOffset = userOffset + 32;
+    const checkedAtOffset = passedOffset + 1;
+    const minLen = checkedAtOffset + 8 + 1; // checked_at + bump
+    if (bytes.length < minLen) {
+      return null;
+    }
+    const passedByte = bytes[passedOffset];
+    if (passedByte !== 0 && passedByte !== 1) {
+      return null;
+    }
+    try {
+      const gate = new PublicKey(bytes.subarray(gateOffset, gateOffset + 32));
+      const user = new PublicKey(bytes.subarray(userOffset, userOffset + 32));
+      const checkedAtBig = bytes.readBigInt64LE(checkedAtOffset);
+      const maxSafe = BigInt(Number.MAX_SAFE_INTEGER);
+      const minSafe = BigInt(Number.MIN_SAFE_INTEGER);
+      const checkedAt =
+        checkedAtBig > maxSafe || checkedAtBig < minSafe ? 0 : Number(checkedAtBig);
+      return {
+        gate,
+        user,
+        passed: passedByte === 1,
+        checkedAt
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  return parseAtOffset(9) ?? parseAtOffset(8);
 }
 
 function buildCreateFormUpdatesFromGateData(gateData: Record<string, unknown>): Partial<CreateFormState> {
@@ -1462,6 +1476,39 @@ function extractPassStatus(result: unknown): boolean | undefined {
   }
 
   return undefined;
+}
+
+function hasCustomProgramErrorCode(value: unknown, code: number): boolean {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  if (typeof value === "number") {
+    return value === code;
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasCustomProgramErrorCode(entry, code));
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.Custom === "number" && record.Custom === code) {
+      return true;
+    }
+    return Object.values(record).some((entry) => hasCustomProgramErrorCode(entry, code));
+  }
+  return false;
+}
+
+async function simulateInstructionWithFeePayer(args: {
+  connection: Connection;
+  feePayer: PublicKey;
+  instruction: TransactionInstruction;
+}) {
+  const { connection, feePayer, instruction } = args;
+  const transaction = new Transaction().add(instruction);
+  transaction.feePayer = feePayer;
+  const latestBlockhash = await connection.getLatestBlockhash("processed");
+  transaction.recentBlockhash = latestBlockhash.blockhash;
+  return connection.simulateTransaction(transaction);
 }
 
 function toDisplayValue(value: unknown): unknown {
@@ -3200,27 +3247,89 @@ export default function Page() {
         storeRecord: effectiveCheckForm.storeRecord
       };
 
-      const result = await executeSdkMethod({
-        action: "check",
-        params,
-        connection,
-        wallet: wallet as unknown as WalletProvider
-      });
+      const shouldStoreRecord = Boolean(effectiveCheckForm.storeRecord);
+      let result: unknown;
+      let signature: string | undefined;
+      let passed: boolean;
 
-      const signature = extractSignature(result);
+      if (shouldStoreRecord) {
+        const client = await getMemberClient();
+        const checkMethod = getSdkClientMethod<((arg: unknown) => unknown)>(client, [
+          "checkAccess",
+          "checkGate"
+        ]);
+        if (!checkMethod) {
+          throw new Error("SDK client is missing checkAccess/checkGate.");
+        }
+        result = await Promise.resolve(checkMethod.call(client, params));
+        signature = extractSignature(result);
+        passed = extractPassStatus(result) ?? true;
+      } else {
+        const readOnlyClient = await getAdminClient({ readOnly: true });
+        const buildInstruction = getSdkClientMethod<((arg: unknown) => Promise<TransactionInstruction>)>(
+          readOnlyClient,
+          ["buildCheckAccessInstruction", "buildCheckGateInstruction"]
+        );
+        if (!buildInstruction) {
+          throw new Error("SDK client is missing buildCheckAccessInstruction/buildCheckGateInstruction.");
+        }
+
+        const instruction = await buildInstruction.call(readOnlyClient, {
+          ...params,
+          storeRecord: false
+        });
+        const simulation = await simulateInstructionWithFeePayer({
+          connection,
+          feePayer: params.user,
+          instruction
+        });
+        const simulationErr = simulation.value.err;
+        if (!simulationErr) {
+          passed = true;
+        } else if (hasCustomProgramErrorCode(simulationErr, 6002)) {
+          passed = false;
+        } else {
+          const logs = simulation.value.logs ?? [];
+          const logSummary = logs.length > 0 ? ` Logs: ${logs.join(" | ")}` : "";
+          throw new Error(`RPC simulation failed: ${JSON.stringify(simulationErr)}.${logSummary}`);
+        }
+        result = {
+          mode: "rpc-simulation",
+          slot: simulation.context.slot,
+          err: simulationErr,
+          logs: simulation.value.logs ?? [],
+          unitsConsumed: simulation.value.unitsConsumed ?? null
+        };
+      }
+
+      const resultMessage =
+        passed === true
+          ? shouldStoreRecord
+            ? "Access granted for this gate."
+            : "Access granted (RPC simulation, no transaction sent)."
+          : passed === false
+            ? "Access not granted for this gate."
+            : signature
+              ? "Check transaction submitted."
+              : "Check completed.";
+
       setActivity((prev) => [
         {
           label: "Check Gate",
-          message: signature ? "Check submitted." : "Check completed.",
+          message: resultMessage,
           signature,
           createdAt: Date.now()
         },
         ...prev
       ]);
 
-      notify(signature ? `Check submitted. Signature: ${signature}` : "Check completed.", "success");
+      notify(
+        signature ? `Check submitted. Signature: ${signature}` : resultMessage,
+        passed === false ? "info" : "success"
+      );
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Failed to check gate.", "error");
+      const message = await formatCheckGateError(error, connection);
+      notify(message, "error");
     } finally {
       setCheckBusy(false);
     }
@@ -3259,21 +3368,16 @@ export default function Page() {
         storeRecord: effectiveForm.storeRecord
       };
 
-      const client = await getMemberClient();
-      const checkMethod = getSdkClientMethod<((arg: unknown) => unknown)>(client, [
-        "checkAccess",
-        "checkGate"
-      ]);
-      const simulateMethod = getSdkClientMethod<((arg: unknown) => unknown)>(client, [
-        "simulateCheckAccess",
-        "simulateCheckGate"
-      ]);
-
       const shouldStoreRecord = Boolean(effectiveForm.storeRecord);
       let result: unknown;
       let signature: string | undefined;
       let passed: boolean;
       if (shouldStoreRecord) {
+        const client = await getMemberClient();
+        const checkMethod = getSdkClientMethod<((arg: unknown) => unknown)>(client, [
+          "checkAccess",
+          "checkGate"
+        ]);
         if (!checkMethod) {
           throw new Error("SDK client is missing checkAccess/checkGate.");
         }
@@ -3282,17 +3386,41 @@ export default function Page() {
         // On-chain check_access/check_gate returns an error when not passed.
         passed = extractPassStatus(result) ?? true;
       } else {
-        if (!simulateMethod) {
-          throw new Error(
-            "SDK client is missing simulateCheckAccess/simulateCheckGate. Update @grapenpm/grape-access-sdk."
-          );
+        const readOnlyClient = await getAdminClient({ readOnly: true });
+        const buildInstruction = getSdkClientMethod<((arg: unknown) => Promise<TransactionInstruction>)>(
+          readOnlyClient,
+          ["buildCheckAccessInstruction", "buildCheckGateInstruction"]
+        );
+        if (!buildInstruction) {
+          throw new Error("SDK client is missing buildCheckAccessInstruction/buildCheckGateInstruction.");
         }
-        result = await Promise.resolve(simulateMethod.call(client, params));
-        if (typeof result === "boolean") {
-          passed = result;
+
+        const instruction = await buildInstruction.call(readOnlyClient, {
+          ...params,
+          storeRecord: false
+        });
+        const simulation = await simulateInstructionWithFeePayer({
+          connection,
+          feePayer: params.user,
+          instruction
+        });
+        const simulationErr = simulation.value.err;
+        if (!simulationErr) {
+          passed = true;
+        } else if (hasCustomProgramErrorCode(simulationErr, 6002)) {
+          passed = false;
         } else {
-          passed = extractPassStatus(result) ?? true;
+          const logs = simulation.value.logs ?? [];
+          const logSummary = logs.length > 0 ? ` Logs: ${logs.join(" | ")}` : "";
+          throw new Error(`RPC simulation failed: ${JSON.stringify(simulationErr)}.${logSummary}`);
         }
+        result = {
+          mode: "rpc-simulation",
+          slot: simulation.context.slot,
+          err: simulationErr,
+          logs: simulation.value.logs ?? [],
+          unitsConsumed: simulation.value.unitsConsumed ?? null
+        };
       }
       const resultMessage =
         passed === true
@@ -3665,16 +3793,18 @@ export default function Page() {
       try {
         const fetchedByPda = new Map<string, any>();
         for (const candidate of recordOwnerCandidates) {
-          const fetched = await allMethod.call(checkRecordAccountClient, [
-            { memcmp: { offset: 9, bytes: candidate } }
-          ]);
-          for (const entry of Array.isArray(fetched) ? fetched : []) {
-            const pda =
-              (entry as any)?.publicKey && typeof (entry as any).publicKey.toBase58 === "function"
-                ? (entry as any).publicKey.toBase58()
-                : "";
-            if (pda && !fetchedByPda.has(pda)) {
-              fetchedByPda.set(pda, entry);
+          for (const ownerOffset of CHECK_RECORD_OWNER_OFFSETS) {
+            const fetched = await allMethod.call(checkRecordAccountClient, [
+              { memcmp: { offset: ownerOffset, bytes: candidate } }
+            ]);
+            for (const entry of Array.isArray(fetched) ? fetched : []) {
+              const pda =
+                (entry as any)?.publicKey && typeof (entry as any).publicKey.toBase58 === "function"
+                  ? (entry as any).publicKey.toBase58()
+                  : "";
+              if (pda && !fetchedByPda.has(pda)) {
+                fetchedByPda.set(pda, entry);
+              }
             }
           }
         }
@@ -3714,13 +3844,15 @@ export default function Page() {
     if (records.length === 0 && connection) {
       const rawMatchesByPda = new Map<string, { pubkey: PublicKey; account: { data: Buffer } }>();
       for (const candidate of recordOwnerCandidates) {
-        const rawMatches = await connection.getProgramAccounts(GPASS_PROGRAM_ID, {
-          filters: [{ memcmp: { offset: 9, bytes: candidate } }]
-        });
-        for (const entry of rawMatches) {
-          const pda = entry.pubkey.toBase58();
-          if (!rawMatchesByPda.has(pda)) {
-            rawMatchesByPda.set(pda, entry as { pubkey: PublicKey; account: { data: Buffer } });
+        for (const ownerOffset of CHECK_RECORD_OWNER_OFFSETS) {
+          const rawMatches = await connection.getProgramAccounts(GPASS_PROGRAM_ID, {
+            filters: [{ memcmp: { offset: ownerOffset, bytes: candidate } }]
+          });
+          for (const entry of rawMatches) {
+            const pda = entry.pubkey.toBase58();
+            if (!rawMatchesByPda.has(pda)) {
+              rawMatchesByPda.set(pda, entry as { pubkey: PublicKey; account: { data: Buffer } });
+            }
           }
         }
       }
