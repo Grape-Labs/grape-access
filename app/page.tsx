@@ -286,8 +286,10 @@ const primaryTabItems = [
   { label: "Community Gate", value: 4 }
 ] as const;
 const CHECK_INSTRUCTION_DISCRIMINATORS = new Set([
-  "097d0319a9f78d68", // checkAccess
-  "71f768eb3121169a" // checkGate (legacy)
+  "4a3e2abc60e53f32", // check_access
+  "87c05f46a62dcf29", // check_gate (legacy)
+  "097d0319a9f78d68", // checkAccess (IDL/client compatibility)
+  "71f768eb3121169a" // checkGate (IDL/client compatibility)
 ]);
 const CHECK_RECORD_OWNER_OFFSETS = [8, 9] as const;
 
@@ -1099,23 +1101,15 @@ async function resolveVerificationSpaceContext(connection: Connection, grapeSpac
       if (!space || !space.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
         return null;
       }
-      const saltCandidates: Uint8Array[] = [];
-      if (space.data.length >= 105) {
-        saltCandidates.push(Uint8Array.from(space.data.subarray(73, 105)));
-      }
-      if (space.data.length >= 73) {
-        saltCandidates.push(Uint8Array.from(space.data.subarray(41, 73)));
-      }
-      const uniqueSaltCandidates: Uint8Array[] = [];
-      for (const salt of saltCandidates) {
-        if (!uniqueSaltCandidates.some((entry) => Buffer.from(entry).equals(Buffer.from(salt)))) {
-          uniqueSaltCandidates.push(salt);
-        }
-      }
-      if (uniqueSaltCandidates.length === 0) {
+      const saltCandidates = extractVerificationSaltCandidatesForResolvedSpace(space.data, candidate);
+      if (saltCandidates.length === 0) {
         return null;
       }
-      return { space: candidate, saltCandidates: uniqueSaltCandidates };
+      return {
+        space: candidate,
+        saltCandidates,
+        spaceData: Uint8Array.from(space.data)
+      };
     } catch {
       return null;
     }
@@ -1137,17 +1131,117 @@ async function resolveVerificationSpaceContext(connection: Connection, grapeSpac
   return null;
 }
 
+function byteArraysEqual(left: Uint8Array, right: Uint8Array) {
+  return Buffer.from(left).equals(Buffer.from(right));
+}
+
+function readI64Le(bytes: Uint8Array, offset: number): number {
+  if (offset < 0 || offset + 8 > bytes.length) {
+    return 0;
+  }
+  const view = Buffer.from(bytes);
+  const value = view.readBigInt64LE(offset);
+  const maxSafe = BigInt(Number.MAX_SAFE_INTEGER);
+  const minSafe = BigInt(Number.MIN_SAFE_INTEGER);
+  if (value > maxSafe || value < minSafe) {
+    return 0;
+  }
+  return Number(value);
+}
+
+function parseVerificationIdentityData(
+  identityData: Uint8Array | Buffer
+): { platform: number; verified: boolean; verifiedAt: number; expiresAt: number } | null {
+  const bytes = Uint8Array.from(identityData);
+  for (const offset of [8, 0]) {
+    if (bytes.length < offset + 83) {
+      continue;
+    }
+    try {
+      const platform = bytes[offset + 33];
+      const verifiedRaw = bytes[offset + 66];
+      if (verifiedRaw !== 0 && verifiedRaw !== 1) {
+        continue;
+      }
+      const verified = verifiedRaw === 1;
+      const verifiedAt = readI64Le(bytes, offset + 67);
+      const expiresAt = readI64Le(bytes, offset + 75);
+      return { platform, verified, verifiedAt, expiresAt };
+    } catch {
+      // Ignore and try fallback offset.
+    }
+  }
+  return null;
+}
+
+function identityBelongsToSpace(identityData: Uint8Array | Buffer, grapeSpace: PublicKey): boolean {
+  const bytes = Uint8Array.from(identityData);
+  const spaceBytes = grapeSpace.toBytes();
+  if (bytes.length >= 40 && byteArraysEqual(bytes.subarray(8, 40), spaceBytes)) {
+    return true;
+  }
+  if (bytes.length >= 41 && byteArraysEqual(bytes.subarray(9, 41), spaceBytes)) {
+    return true;
+  }
+  if (bytes.length >= 72 && byteArraysEqual(bytes.subarray(40, 72), spaceBytes)) {
+    return true;
+  }
+  if (bytes.length >= 73 && byteArraysEqual(bytes.subarray(41, 73), spaceBytes)) {
+    return true;
+  }
+  return false;
+}
+
+function getIdentityGateEligibilityIssue(args: {
+  identityData: Uint8Array | Buffer;
+  grapeSpace: PublicKey;
+  allowedPlatforms: number[];
+  nowUnix: number;
+}): string | null {
+  const { identityData, grapeSpace, allowedPlatforms, nowUnix } = args;
+  if (!identityBelongsToSpace(identityData, grapeSpace)) {
+    return "Identity account does not belong to this gate's verification space.";
+  }
+  const parsed = parseVerificationIdentityData(identityData);
+  if (!parsed) {
+    return "Identity account data could not be parsed.";
+  }
+  if (!parsed.verified) {
+    return "Identity account is not currently verified.";
+  }
+  if (parsed.expiresAt > 0 && nowUnix > parsed.expiresAt) {
+    return "Identity verification is expired.";
+  }
+  if (allowedPlatforms.length > 0 && !allowedPlatforms.includes(parsed.platform)) {
+    return `Identity platform ${parsed.platform} is not allowed by this gate.`;
+  }
+  return null;
+}
+
 async function findWalletLinkedIdentity({
   connection,
   grapeSpace,
-  walletHashes
+  walletHashes,
+  allowedPlatforms,
+  nowUnix
 }: {
   connection: Connection;
   grapeSpace: PublicKey;
   walletHashes: Uint8Array[];
+  allowedPlatforms: number[];
+  nowUnix: number;
 }): Promise<{ identity: PublicKey; link: PublicKey } | null> {
   try {
-    for (const walletHash of walletHashes) {
+    const candidates: Array<{
+      identity: PublicKey;
+      link: PublicKey;
+      platform: number;
+      verifiedAt: number;
+      linkedAt: number;
+    }> = [];
+    const seenCandidates = new Set<string>();
+
+    for (const walletHash of uniqueByteArrays(walletHashes)) {
       const links = await connection.getProgramAccounts(GRAPE_VERIFICATION_PROGRAM_ID, {
         filters: [{ memcmp: { offset: 41, bytes: bs58.encode(Buffer.from(walletHash)) } }]
       });
@@ -1163,23 +1257,159 @@ async function findWalletLinkedIdentity({
         if (!identityInfo || !identityInfo.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
           continue;
         }
-        const identityData = identityInfo.data;
-        const hasOldLayoutSpaceMatch =
-          identityData.length >= 41 &&
-          Buffer.from(identityData.subarray(9, 41)).equals(Buffer.from(grapeSpace.toBytes()));
-        const hasNewLayoutSpaceMatch =
-          identityData.length >= 73 &&
-          Buffer.from(identityData.subarray(41, 73)).equals(Buffer.from(grapeSpace.toBytes()));
-        if (!hasOldLayoutSpaceMatch && !hasNewLayoutSpaceMatch) {
+        const identityIssue = getIdentityGateEligibilityIssue({
+          identityData: identityInfo.data,
+          grapeSpace,
+          allowedPlatforms,
+          nowUnix
+        });
+        if (identityIssue) {
           continue;
         }
-        return { identity: parsed.identity, link: entry.pubkey };
+        const identityParsed = parseVerificationIdentityData(identityInfo.data);
+        if (!identityParsed) {
+          continue;
+        }
+        const key = `${parsed.identity.toBase58()}:${entry.pubkey.toBase58()}`;
+        if (seenCandidates.has(key)) {
+          continue;
+        }
+        seenCandidates.add(key);
+        candidates.push({
+          identity: parsed.identity,
+          link: entry.pubkey,
+          platform: identityParsed.platform,
+          verifiedAt: identityParsed.verifiedAt,
+          linkedAt: parsed.linkedAt
+        });
       }
+    }
+
+    if (candidates.length > 0) {
+      const platformOrder = new Map<number, number>();
+      for (const [index, platform] of allowedPlatforms.entries()) {
+        if (!platformOrder.has(platform)) {
+          platformOrder.set(platform, index);
+        }
+      }
+      candidates.sort((left, right) => {
+        const leftOrder = platformOrder.get(left.platform) ?? Number.MAX_SAFE_INTEGER;
+        const rightOrder = platformOrder.get(right.platform) ?? Number.MAX_SAFE_INTEGER;
+        if (leftOrder !== rightOrder) {
+          return leftOrder - rightOrder;
+        }
+        if (left.verifiedAt !== right.verifiedAt) {
+          return right.verifiedAt - left.verifiedAt;
+        }
+        return right.linkedAt - left.linkedAt;
+      });
+      const best = candidates[0];
+      return { identity: best.identity, link: best.link };
     }
   } catch {
     // Ignore lookup errors and fall back to other derivation paths.
   }
   return null;
+}
+
+async function getLinkedIdentityForUser(args: {
+  connection: Connection;
+  user: PublicKey;
+  grapeSpace: PublicKey;
+  verificationSpaceSaltCandidates: Uint8Array[];
+  allowedPlatforms: number[];
+  nowUnix: number;
+}) {
+  const { connection, user, grapeSpace, verificationSpaceSaltCandidates, allowedPlatforms, nowUnix } =
+    args;
+  if (verificationSpaceSaltCandidates.length === 0) {
+    return null;
+  }
+  const walletHashes = uniqueByteArrays(
+    verificationSpaceSaltCandidates.map((spaceSalt) =>
+      GrapeVerificationRegistry.walletHash(spaceSalt, user)
+    )
+  );
+  return findWalletLinkedIdentity({
+    connection,
+    grapeSpace,
+    walletHashes,
+    allowedPlatforms,
+    nowUnix
+  });
+}
+
+async function validateExistingIdentityForGate(args: {
+  connection: Connection;
+  identity: PublicKey;
+  grapeSpace: PublicKey;
+  allowedPlatforms: number[];
+  nowUnix: number;
+}) {
+  const { connection, identity, grapeSpace, allowedPlatforms, nowUnix } = args;
+  const info = await connection.getAccountInfo(identity);
+  if (!info || !info.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
+    return "Identity account is missing or has invalid owner.";
+  }
+  return getIdentityGateEligibilityIssue({
+    identityData: info.data,
+    grapeSpace,
+    allowedPlatforms,
+    nowUnix
+  });
+}
+
+async function validateExistingLinkForUser(args: {
+  connection: Connection;
+  link: PublicKey;
+  identity: PublicKey;
+  user: PublicKey;
+  verificationSpaceSaltCandidates: Uint8Array[];
+}) {
+  const { connection, link, identity, user, verificationSpaceSaltCandidates } = args;
+  const info = await connection.getAccountInfo(link);
+  if (!info || !info.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
+    return "Link account is missing or has invalid owner.";
+  }
+  try {
+    const parsed = GrapeVerificationRegistry.parseLink(info.data);
+    if (!parsed.identity.equals(identity)) {
+      return "Link account points to a different identity.";
+    }
+    if (verificationSpaceSaltCandidates.length > 0) {
+      const candidateHashes = verificationSpaceSaltCandidates.map((salt) =>
+        GrapeVerificationRegistry.walletHash(salt, user)
+      );
+      if (!candidateHashes.some((hash) => byteArraysEqual(hash, parsed.walletHash))) {
+        return "Link account wallet hash does not match this user for the gate's verification salts.";
+      }
+    }
+    return null;
+   } catch {
+    return "Link account data could not be parsed.";
+  }
+}
+
+async function deriveRequiredLinkForUser(args: {
+  connection: Connection;
+  identity: PublicKey;
+  user: PublicKey;
+  verificationSpaceSaltCandidates: Uint8Array[];
+}) {
+  const { connection, identity, user, verificationSpaceSaltCandidates } = args;
+  const registryWalletHashes = uniqueByteArrays(
+    verificationSpaceSaltCandidates.map((spaceSalt) =>
+      GrapeVerificationRegistry.walletHash(spaceSalt, user)
+    )
+  );
+  for (const registryWalletHash of registryWalletHashes) {
+    const [registryLinkPda] = GrapeVerificationRegistry.deriveLinkPda(identity, registryWalletHash);
+    const registryLinkExists = await connection.getAccountInfo(registryLinkPda);
+    if (registryLinkExists) {
+      return registryLinkPda;
+    }
+  }
+  return undefined;
 }
 
 async function sha256Bytes(bytes: Uint8Array): Promise<Uint8Array> {
@@ -1203,6 +1433,71 @@ function uniqueByteArrays(values: Uint8Array[]): Uint8Array[] {
     }
   }
   return out;
+}
+
+function extractVerificationSaltCandidates(spaceData: Uint8Array): Uint8Array[] {
+  const salts: Uint8Array[] = [];
+  if (spaceData.length >= 72) {
+    salts.push(Uint8Array.from(spaceData.subarray(40, 72)));
+  }
+  if (spaceData.length >= 105) {
+    salts.push(Uint8Array.from(spaceData.subarray(73, 105)));
+  }
+  if (spaceData.length >= 73) {
+    salts.push(Uint8Array.from(spaceData.subarray(41, 73)));
+  }
+  if (spaceData.length >= 137) {
+    salts.push(Uint8Array.from(spaceData.subarray(105, 137)));
+  }
+  if (spaceData.length >= 138) {
+    salts.push(Uint8Array.from(spaceData.subarray(106, 138)));
+  }
+  if (spaceData.length >= 139) {
+    salts.push(Uint8Array.from(spaceData.subarray(107, 139)));
+  }
+  return uniqueByteArrays(salts);
+}
+
+function discoverVerificationDaoOffsets(spaceData: Uint8Array, resolvedSpace: PublicKey) {
+  const discoveredDaoOffsets: Array<{ offset: number; daoId: PublicKey }> = [];
+  for (let offset = 0; offset + 32 <= spaceData.length; offset += 1) {
+    try {
+      const daoId = new PublicKey(spaceData.subarray(offset, offset + 32));
+      const [derivedSpace] = GrapeVerificationRegistry.deriveSpacePda(daoId);
+      if (!derivedSpace.equals(resolvedSpace)) {
+        continue;
+      }
+      if (discoveredDaoOffsets.some((entry) => entry.daoId.equals(daoId))) {
+        continue;
+      }
+      discoveredDaoOffsets.push({ offset, daoId });
+    } catch {
+      // Ignore invalid windows.
+    }
+  }
+  return discoveredDaoOffsets;
+}
+
+function extractVerificationSaltCandidatesForResolvedSpace(
+  spaceData: Uint8Array,
+  resolvedSpace: PublicKey
+) {
+  const salts = extractVerificationSaltCandidates(spaceData);
+  const discoveredDaoOffsets = discoverVerificationDaoOffsets(spaceData, resolvedSpace);
+  const pushIfPresent = (start: number) => {
+    if (start < 0 || start + 32 > spaceData.length) {
+      return;
+    }
+    salts.push(Uint8Array.from(spaceData.subarray(start, start + 32)));
+  };
+
+  for (const entry of discoveredDaoOffsets) {
+    pushIfPresent(entry.offset + 32);
+    pushIfPresent(entry.offset + 64);
+    pushIfPresent(entry.offset + 98);
+  }
+
+  return uniqueByteArrays(salts);
 }
 
 async function resolveSdkClient(
@@ -2250,7 +2545,7 @@ export default function Page() {
         criteriaVariant.type === "verifiedWithWallet" ||
         (criteriaVariant.type === "combined" && Boolean(criteriaVariant.config.requireWalletLink));
 
-      if (requiresReputation && !checkForm.reputationAccount.trim()) {
+      if (requiresReputation) {
         const vineConfig = asPublicKeyValue(criteriaVariant.config.vineConfig);
         const season = asNumberValue(criteriaVariant.config.season);
         if (vineConfig && season !== undefined) {
@@ -2277,22 +2572,44 @@ export default function Page() {
           : null;
         const grapeSpace = resolvedVerificationSpace?.space ?? grapeSpaceInput;
         const verificationSpaceSaltCandidates = resolvedVerificationSpace?.saltCandidates ?? [];
+        const platforms = normalizePlatforms(criteriaVariant.config.platforms);
+        const nowUnix = Math.floor(Date.now() / 1000);
 
-        if (!selectedIdentity && !selectedLink && grapeSpace && verificationSpaceSaltCandidates.length > 0) {
-          const walletHashes = uniqueByteArrays(
-            verificationSpaceSaltCandidates.map((spaceSalt) =>
-              GrapeVerificationRegistry.walletHash(spaceSalt, user)
-            )
-          );
-          const linked = await findWalletLinkedIdentity({
+        if (selectedIdentity && grapeSpace) {
+          const selectedIdentityIssue = await validateExistingIdentityForGate({
             connection,
+            identity: selectedIdentity,
             grapeSpace,
-            walletHashes
+            allowedPlatforms: platforms,
+            nowUnix
+          });
+          if (selectedIdentityIssue) {
+            selectedIdentity = undefined;
+            selectedLink = undefined;
+            notes.push("Existing identity account does not satisfy gate criteria; attempting re-derive.");
+          }
+        }
+
+        if (grapeSpace) {
+          const linked = await getLinkedIdentityForUser({
+            connection,
+            user,
+            grapeSpace,
+            verificationSpaceSaltCandidates,
+            allowedPlatforms: platforms,
+            nowUnix
           });
           if (linked) {
+            if (
+              !selectedIdentity ||
+              !selectedIdentity.equals(linked.identity) ||
+              !selectedLink ||
+              !selectedLink.equals(linked.link)
+            ) {
+              notes.push("Resolved identity and wallet link from verification registry.");
+            }
             selectedIdentity = linked.identity;
             selectedLink = linked.link;
-            notes.push("Resolved identity and wallet link from verification registry.");
           }
         }
 
@@ -2308,47 +2625,45 @@ export default function Page() {
 
         if (requiresLink) {
           if (selectedLink) {
+            if (selectedIdentity) {
+              const selectedLinkIssue = await validateExistingLinkForUser({
+                connection,
+                link: selectedLink,
+                identity: selectedIdentity,
+                user,
+                verificationSpaceSaltCandidates
+              });
+              if (selectedLinkIssue) {
+                selectedLink = undefined;
+                notes.push("Existing link account does not match selected identity/user; attempting re-derive.");
+              }
+            }
+          } else if (!selectedIdentity) {
+            addBlocker("Wallet link is required but identity account is missing.");
+          }
+
+          if (!selectedLink && selectedIdentity) {
+            selectedLink = await deriveRequiredLinkForUser({
+              connection,
+              identity: selectedIdentity,
+              user,
+              verificationSpaceSaltCandidates
+            });
+          }
+
+          if (selectedLink) {
             const nextLink = selectedLink.toBase58();
             updates.linkAccount = nextLink;
             if (nextLink !== checkForm.linkAccount.trim()) {
               derivedCount += 1;
             }
-          } else if (!selectedIdentity) {
-            addBlocker("Wallet link is required but identity account is missing.");
-          } else {
-            if (verificationSpaceSaltCandidates.length > 0) {
-              const registryWalletHashes = uniqueByteArrays(
-                verificationSpaceSaltCandidates.map((spaceSalt) =>
-                  GrapeVerificationRegistry.walletHash(spaceSalt, user)
-                )
-              );
-              for (const registryWalletHash of registryWalletHashes) {
-                const [registryLinkPda] = GrapeVerificationRegistry.deriveLinkPda(
-                  selectedIdentity,
-                  registryWalletHash
-                );
-                const registryLinkExists = await connection.getAccountInfo(registryLinkPda);
-                if (registryLinkExists) {
-                  selectedLink = registryLinkPda;
-                  break;
-                }
-              }
-            }
-
-            if (selectedLink) {
-              const nextLink = selectedLink.toBase58();
-              updates.linkAccount = nextLink;
-              if (nextLink !== checkForm.linkAccount.trim()) {
-                derivedCount += 1;
-              }
-            } else {
-              addBlocker("Could not auto-resolve link account for this user wallet.");
-            }
+          } else if (selectedIdentity) {
+            addBlocker("Could not auto-resolve link account for this user wallet.");
           }
         }
       }
 
-      if (criteriaVariant.type === "tokenHolding" && !checkForm.tokenAccount.trim()) {
+      if (criteriaVariant.type === "tokenHolding") {
         const mint = asPublicKeyValue(criteriaVariant.config.mint);
         const checkAta = criteriaVariant.config.checkAta !== false;
         if (mint && checkAta) {
@@ -2594,6 +2909,7 @@ export default function Page() {
         const grapeSpace = resolvedVerificationSpace?.space ?? grapeSpaceInput;
         const verificationSpaceSaltCandidates = resolvedVerificationSpace?.saltCandidates ?? [];
         const platforms = normalizePlatforms(criteriaVariant.config.platforms);
+        const nowUnix = Math.floor(Date.now() / 1000);
         if (!selectedIdentity && !selectedLink && grapeSpace && verificationSpaceSaltCandidates.length > 0) {
           const walletHashes = uniqueByteArrays(
             verificationSpaceSaltCandidates.map((spaceSalt) =>
@@ -2603,7 +2919,9 @@ export default function Page() {
           const linked = await findWalletLinkedIdentity({
             connection,
             grapeSpace,
-            walletHashes
+            walletHashes,
+            allowedPlatforms: platforms,
+            nowUnix
           });
           if (linked) {
             selectedIdentity = linked.identity;
@@ -3846,7 +4164,52 @@ export default function Page() {
       }
     }
 
-    if (records.length === 0 && connection) {
+    if (typeof allMethod === "function" && records.length < 2) {
+      try {
+        const fetchedAll = await allMethod.call(checkRecordAccountClient);
+        const knownRecordPdas = new Set(records.map((entry) => entry.pda).filter((entry) => Boolean(entry)));
+        for (const entry of Array.isArray(fetchedAll) ? fetchedAll : []) {
+          const account = (entry as any)?.account as Record<string, unknown> | undefined;
+          if (!account) {
+            continue;
+          }
+          const recordOwner = toPubkeyString(account.access ?? account.gate);
+          if (!recordOwner || !recordOwnerCandidateSet.has(recordOwner)) {
+            continue;
+          }
+          const user = toPubkeyString(account.user);
+          if (!user) {
+            continue;
+          }
+          const pda =
+            (entry as any)?.publicKey && typeof (entry as any).publicKey.toBase58 === "function"
+              ? (entry as any).publicKey.toBase58()
+              : "";
+          if (pda && knownRecordPdas.has(pda)) {
+            continue;
+          }
+          const checkedAt = asNumberValue(account.checkedAt ?? account.checked_at) ?? 0;
+          const passed = asBooleanValue(account.passed) ?? false;
+          records.push({
+            pda,
+            user,
+            passed,
+            checkedAt,
+            checkedAtLabel: formatCheckedAt(checkedAt)
+          });
+          if (pda) {
+            knownRecordPdas.add(pda);
+          }
+        }
+        if (records.length > 0) {
+          hasStoredRecordMatches = true;
+        }
+      } catch {
+        // Ignore unfiltered SDK scan failures.
+      }
+    }
+
+    if (connection) {
       const rawMatchesByPda = new Map<string, { pubkey: PublicKey; account: { data: Buffer } }>();
       for (const candidate of recordOwnerCandidates) {
         for (const ownerOffset of CHECK_RECORD_OWNER_OFFSETS) {
@@ -3862,7 +4225,11 @@ export default function Page() {
         }
       }
       const rawMatches = Array.from(rawMatchesByPda.values());
+      const knownRecordPdas = new Set(records.map((entry) => entry.pda).filter((entry) => Boolean(entry)));
       for (const entry of rawMatches) {
+        if (knownRecordPdas.has(entry.pubkey.toBase58())) {
+          continue;
+        }
         const decoded = decodeCheckRecordLikeAccountData(entry.account.data);
         if (decoded) {
           const accountGate = toPubkeyString(decoded.gate ?? decoded.access);
@@ -3882,6 +4249,7 @@ export default function Page() {
             checkedAt,
             checkedAtLabel: formatCheckedAt(checkedAt)
           });
+          knownRecordPdas.add(entry.pubkey.toBase58());
           continue;
         }
 
@@ -3896,9 +4264,77 @@ export default function Page() {
           checkedAt: rawParsed.checkedAt,
           checkedAtLabel: formatCheckedAt(rawParsed.checkedAt)
         });
+        knownRecordPdas.add(entry.pubkey.toBase58());
       }
       if (records.length > 0) {
         hasStoredRecordMatches = true;
+      }
+    }
+
+    if (connection && records.length < 2) {
+      try {
+        const exhaustiveByPda = new Map<string, { pubkey: PublicKey; account: { data: Buffer } }>();
+        for (const dataSize of [83, 75]) {
+          const exhaustiveMatches = await connection.getProgramAccounts(GPASS_PROGRAM_ID, {
+            filters: [{ dataSize }]
+          });
+          for (const entry of exhaustiveMatches) {
+            const pda = entry.pubkey.toBase58();
+            if (!exhaustiveByPda.has(pda)) {
+              exhaustiveByPda.set(pda, entry as { pubkey: PublicKey; account: { data: Buffer } });
+            }
+          }
+        }
+
+        const knownRecordPdas = new Set(records.map((entry) => entry.pda).filter((entry) => Boolean(entry)));
+        for (const entry of exhaustiveByPda.values()) {
+          const pdaBase58 = entry.pubkey.toBase58();
+          if (knownRecordPdas.has(pdaBase58)) {
+            continue;
+          }
+
+          const decoded = decodeCheckRecordLikeAccountData(entry.account.data);
+          if (decoded) {
+            const accountGate = toPubkeyString(decoded.gate ?? decoded.access);
+            if (!accountGate || !recordOwnerCandidateSet.has(accountGate)) {
+              continue;
+            }
+            const user = toPubkeyString(decoded.user);
+            if (!user) {
+              continue;
+            }
+            const checkedAt = asNumberValue(decoded.checkedAt ?? decoded.checked_at) ?? 0;
+            const passed = asBooleanValue(decoded.passed) ?? false;
+            records.push({
+              pda: pdaBase58,
+              user,
+              passed,
+              checkedAt,
+              checkedAtLabel: formatCheckedAt(checkedAt)
+            });
+            knownRecordPdas.add(pdaBase58);
+            continue;
+          }
+
+          const rawParsed = readGateCheckRecordFromRawData(entry.account.data);
+          if (!rawParsed || !recordOwnerCandidateSet.has(rawParsed.gate.toBase58())) {
+            continue;
+          }
+          records.push({
+            pda: pdaBase58,
+            user: rawParsed.user.toBase58(),
+            passed: rawParsed.passed,
+            checkedAt: rawParsed.checkedAt,
+            checkedAtLabel: formatCheckedAt(rawParsed.checkedAt)
+          });
+          knownRecordPdas.add(pdaBase58);
+        }
+
+        if (records.length > 0) {
+          hasStoredRecordMatches = true;
+        }
+      } catch {
+        // Ignore exhaustive fallback failures.
       }
     }
 
@@ -3909,29 +4345,56 @@ export default function Page() {
         { signature: string; blockTime: number | null; slot: number }
       >();
 
-      for (const target of signatureTargets) {
-        try {
-          const signatureBatch = await connection.getSignaturesForAddress(target, { limit: 300 });
-          for (const item of signatureBatch) {
+      const fetchSignatureHistory = async (target: PublicKey, maxSignatures = 1500) => {
+        const collected: Array<{ signature: string; blockTime: number | null; slot: number }> = [];
+        let before: string | undefined;
+        while (collected.length < maxSignatures) {
+          let batch: Awaited<ReturnType<Connection["getSignaturesForAddress"]>> = [];
+          try {
+            batch = await connection.getSignaturesForAddress(target, {
+              limit: Math.min(1000, maxSignatures - collected.length),
+              before
+            });
+          } catch {
+            break;
+          }
+          if (!Array.isArray(batch) || batch.length === 0) {
+            break;
+          }
+          for (const item of batch) {
             if (item.err) {
               continue;
             }
-            if (!signatureMap.has(item.signature)) {
-              signatureMap.set(item.signature, {
-                signature: item.signature,
-                blockTime: item.blockTime ?? null,
-                slot: item.slot
-              });
-            }
+            collected.push({
+              signature: item.signature,
+              blockTime: item.blockTime ?? null,
+              slot: item.slot
+            });
           }
-        } catch {
-          // Ignore per-target signature fetch errors.
+          before = batch[batch.length - 1]?.signature;
+          if (!before || batch.length < Math.min(1000, maxSignatures - collected.length)) {
+            break;
+          }
+        }
+        return collected;
+      };
+
+      for (const target of signatureTargets) {
+        const signatureBatch = await fetchSignatureHistory(target, 1500);
+        for (const item of signatureBatch) {
+          if (!signatureMap.has(item.signature)) {
+            signatureMap.set(item.signature, {
+              signature: item.signature,
+              blockTime: item.blockTime ?? null,
+              slot: item.slot
+            });
+          }
         }
       }
 
       const signatureCandidates = Array.from(signatureMap.values())
         .sort((a, b) => (b.blockTime ?? 0) - (a.blockTime ?? 0))
-        .slice(0, 150);
+        .slice(0, 800);
 
       const txBatch = await Promise.all(
         signatureCandidates.map(async (signatureInfo) => {
@@ -3955,7 +4418,13 @@ export default function Page() {
         }
 
         const parsedInstructions = entry.transaction.transaction.message.instructions as Array<any>;
-        for (const instruction of parsedInstructions) {
+        const innerInstructions = (
+          entry.transaction.meta?.innerInstructions?.flatMap((inner) =>
+            Array.isArray((inner as any)?.instructions) ? ((inner as any).instructions as Array<any>) : []
+          ) ?? []
+        ) as Array<any>;
+        const allInstructions = [...parsedInstructions, ...innerInstructions];
+        for (const instruction of allInstructions) {
           const instructionProgramId =
             typeof instruction.programId === "string"
               ? instruction.programId
@@ -5845,7 +6314,7 @@ export default function Page() {
                         {checkDeriveBusy ? "Deriving..." : "Auto-Derive Accounts"}
                       </Button>
                     )}
-                    {(isAdvancedCheckMode || checkDerive.status === "error") && (
+                    {(isAdvancedCheckMode || checkDerive.status !== "idle") && (
                       <Alert severity={checkDerive.status === "error" ? "error" : "info"}>
                         {checkDerive.message}
                       </Alert>

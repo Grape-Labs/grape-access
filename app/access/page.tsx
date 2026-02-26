@@ -1529,6 +1529,7 @@ async function findWalletLinkedIdentity({
       identity: PublicKey;
       link: PublicKey;
       platform: number;
+      verifiedAt: number;
       linkedAt: number;
     }> = [];
     const seenCandidates = new Set<string>();
@@ -1571,6 +1572,7 @@ async function findWalletLinkedIdentity({
           identity: parsed.identity,
           link: entry.pubkey,
           platform: identityParsed.platform,
+          verifiedAt: identityParsed.verifiedAt,
           linkedAt: parsed.linkedAt
         });
       }
@@ -1587,6 +1589,9 @@ async function findWalletLinkedIdentity({
         const rightOrder = platformOrder.get(right.platform) ?? Number.MAX_SAFE_INTEGER;
         if (leftOrder !== rightOrder) {
           return leftOrder - rightOrder;
+        }
+        if (left.verifiedAt !== right.verifiedAt) {
+          return right.verifiedAt - left.verifiedAt;
         }
         return right.linkedAt - left.linkedAt;
       });
@@ -2570,6 +2575,51 @@ export default function AccessPage() {
           const identityValueCandidates = buildIdentityValueCandidates(memberForm.identityValue);
           if (grapeSpace && identityValueCandidates.length > 0) {
             const platformCandidates = platforms.length > 0 ? platforms : [0];
+            const platformOrder = new Map<number, number>();
+            for (const [index, platform] of platformCandidates.entries()) {
+              if (!platformOrder.has(platform)) {
+                platformOrder.set(platform, index);
+              }
+            }
+            const viableIdentityCandidates: Array<{
+              identity: PublicKey;
+              platform: number;
+              verifiedAt: number;
+            }> = [];
+            const viableIdentityKeys = new Set<string>();
+
+            const tryAddViableIdentityCandidate = (
+              identityPda: PublicKey,
+              accountInfo: { owner: PublicKey; data: Buffer | Uint8Array } | null
+            ) => {
+              if (!accountInfo || !accountInfo.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
+                return;
+              }
+              if (
+                getIdentityGateEligibilityIssue({
+                  identityData: accountInfo.data,
+                  grapeSpace,
+                  allowedPlatforms: platforms,
+                  nowUnix
+                })
+              ) {
+                return;
+              }
+              const parsedIdentity = parseVerificationIdentityData(accountInfo.data);
+              if (!parsedIdentity) {
+                return;
+              }
+              const key = identityPda.toBase58();
+              if (viableIdentityKeys.has(key)) {
+                return;
+              }
+              viableIdentityKeys.add(key);
+              viableIdentityCandidates.push({
+                identity: identityPda,
+                platform: parsedIdentity.platform,
+                verifiedAt: parsedIdentity.verifiedAt
+              });
+            };
 
             let fallbackIdentity: PublicKey | undefined;
             if (verificationSaltCandidates.length > 0) {
@@ -2592,31 +2642,13 @@ export default function AccessPage() {
                     );
                     fallbackIdentity = fallbackIdentity ?? identityPda;
                     const exists = await connection.getAccountInfo(identityPda);
-                    if (
-                      exists &&
-                      exists.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID) &&
-                      !getIdentityGateEligibilityIssue({
-                        identityData: exists.data,
-                        grapeSpace,
-                        allowedPlatforms: platforms,
-                        nowUnix
-                      })
-                    ) {
-                      selectedIdentity = identityPda;
-                      break;
-                    }
+                    tryAddViableIdentityCandidate(identityPda, exists);
                   }
-                  if (selectedIdentity) {
-                    break;
-                  }
-                }
-                if (selectedIdentity) {
-                  break;
                 }
               }
             }
 
-            if (!selectedIdentity) {
+            if (viableIdentityCandidates.length === 0) {
               for (const identityValueCandidate of identityValueCandidates) {
                 const idHash = await sha256Text(identityValueCandidate);
                 for (const platformSeed of platformCandidates) {
@@ -2628,27 +2660,25 @@ export default function AccessPage() {
                   );
                   fallbackIdentity = fallbackIdentity ?? identityPda;
                   const exists = await connection.getAccountInfo(identityPda);
-                  if (
-                    exists &&
-                    exists.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID) &&
-                    !getIdentityGateEligibilityIssue({
-                      identityData: exists.data,
-                      grapeSpace,
-                      allowedPlatforms: platforms,
-                      nowUnix
-                    })
-                  ) {
-                    selectedIdentity = identityPda;
-                    break;
-                  }
-                }
-                if (selectedIdentity) {
-                  break;
+                  tryAddViableIdentityCandidate(identityPda, exists);
                 }
               }
             }
 
-            if (!selectedIdentity && fallbackIdentity) {
+            if (viableIdentityCandidates.length > 0) {
+              viableIdentityCandidates.sort((left, right) => {
+                const leftOrder = platformOrder.get(left.platform) ?? Number.MAX_SAFE_INTEGER;
+                const rightOrder = platformOrder.get(right.platform) ?? Number.MAX_SAFE_INTEGER;
+                if (leftOrder !== rightOrder) {
+                  return leftOrder - rightOrder;
+                }
+                if (left.verifiedAt !== right.verifiedAt) {
+                  return right.verifiedAt - left.verifiedAt;
+                }
+                return left.identity.toBase58().localeCompare(right.identity.toBase58());
+              });
+              selectedIdentity = viableIdentityCandidates[0].identity;
+            } else if (!selectedIdentity && fallbackIdentity) {
               selectedIdentity = fallbackIdentity;
               notes.push("Identity PDA derived but account existence was not confirmed.");
             }
