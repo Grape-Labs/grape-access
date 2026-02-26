@@ -155,10 +155,10 @@ const DEFAULT_COMMUNITY_PROFILE: CommunityProfile = {
   supportLabel: "Need help? Contact your community moderators.",
   supportUrl: "",
   passActions: [
-    { label: "Open Community Hub", href: "https://grape.network" }
+    { label: "Open Community Hub", href: "https://grapedao.org" }
   ],
   failActions: [
-    { label: "Community Help Center", href: "https://grape.network" }
+    { label: "Community Help Center", href: "https://grapedao.org" }
   ]
 };
 
