@@ -3667,6 +3667,32 @@ export default function AccessPage() {
       : memberCheck.passed === false
         ? gateContext.profile.failActions
         : [];
+  const requiresIdentityVerification =
+    gateContext.criteriaVariant?.type === "verifiedIdentity" ||
+    gateContext.criteriaVariant?.type === "verifiedWithWallet" ||
+    gateContext.criteriaVariant?.type === "combined";
+  const requiresWalletLink = Boolean(gateContext.criteriaVariant?.config.requireWalletLink);
+  const identityIssueDetected = useMemo(() => {
+    const diagnostic = `${memberDerive.message} ${memberCheck.message}`.toLowerCase();
+    return (
+      diagnostic.includes("identity") ||
+      diagnostic.includes("verification") ||
+      diagnostic.includes("verified") ||
+      diagnostic.includes("link account") ||
+      diagnostic.includes("wallet link")
+    );
+  }, [memberDerive.message, memberCheck.message]);
+  const verificationPortalUrl = useMemo(() => {
+    const base = new URL("https://verification.governance.so");
+    const grapeSpace = asPublicKeyValue(gateContext.criteriaVariant?.config.grapeSpace);
+    if (grapeSpace) {
+      base.searchParams.set("grapeSpace", grapeSpace.toBase58());
+    }
+    if (memberForm.gateId.trim()) {
+      base.searchParams.set("gateId", memberForm.gateId.trim());
+    }
+    return base.toString();
+  }, [gateContext.criteriaVariant, memberForm.gateId]);
 
   return (
     <Container maxWidth="md" sx={{ py: { xs: 3, md: 5 } }} className="dramatic-shell">
@@ -3932,6 +3958,32 @@ export default function AccessPage() {
               ))}
             </Stack>
           </Paper>
+          {gateContext.status === "ready" && requiresIdentityVerification && (
+            <Alert
+              severity={identityIssueDetected ? "warning" : "info"}
+              action={
+                <Button
+                  href={verificationPortalUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  variant="outlined"
+                  size="small"
+                  sx={{ whiteSpace: "nowrap" }}
+                >
+                  Verify Now
+                </Button>
+              }
+            >
+              Verification is required for this gate. If this wallet is not already verified on
+              {" "}
+              <Box component="span" className="mono">
+                verification.governance.so
+              </Box>
+              {requiresWalletLink
+                ? ", complete verification and wallet linking there, then return and run Check My Access again."
+                : ", complete verification there, then return and run Check My Access again."}
+            </Alert>
+          )}
 
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2} alignItems={{ sm: "center" }}>
             <FormControl sx={{ minWidth: 220 }}>
