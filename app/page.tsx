@@ -3785,7 +3785,9 @@ export default function Page() {
       clientAny.program?.account?.gateCheckRecord;
 
     const records: AdminGateUserItem[] = [];
+    let hasStoredRecordMatches = false;
     let usedTransactionFallback = false;
+    let inferredTransactionUserCount = 0;
     const allMethod =
       checkRecordAccountClient?.all as ((filters?: unknown[]) => Promise<unknown[]>) | undefined;
 
@@ -3835,6 +3837,9 @@ export default function Page() {
             checkedAt,
             checkedAtLabel: formatCheckedAt(checkedAt)
           });
+        }
+        if (records.length > 0) {
+          hasStoredRecordMatches = true;
         }
       } catch {
         // Fall through to raw scan fallback.
@@ -3892,10 +3897,13 @@ export default function Page() {
           checkedAtLabel: formatCheckedAt(rawParsed.checkedAt)
         });
       }
+      if (records.length > 0) {
+        hasStoredRecordMatches = true;
+      }
     }
 
-    if (records.length === 0 && connection) {
-      const signatureTargets = [accessPda, legacyGatePda];
+    if (connection) {
+      const signatureTargets = [accessPda, legacyGatePda, gateId];
       const signatureMap = new Map<
         string,
         { signature: string; blockTime: number | null; slot: number }
@@ -3903,7 +3911,7 @@ export default function Page() {
 
       for (const target of signatureTargets) {
         try {
-          const signatureBatch = await connection.getSignaturesForAddress(target, { limit: 120 });
+          const signatureBatch = await connection.getSignaturesForAddress(target, { limit: 300 });
           for (const item of signatureBatch) {
             if (item.err) {
               continue;
@@ -3923,7 +3931,7 @@ export default function Page() {
 
       const signatureCandidates = Array.from(signatureMap.values())
         .sort((a, b) => (b.blockTime ?? 0) - (a.blockTime ?? 0))
-        .slice(0, 40);
+        .slice(0, 150);
 
       const txBatch = await Promise.all(
         signatureCandidates.map(async (signatureInfo) => {
@@ -3992,6 +4000,7 @@ export default function Page() {
       if (txUsers.size > 0) {
         records.push(...Array.from(txUsers.values()));
         usedTransactionFallback = true;
+        inferredTransactionUserCount = txUsers.size;
       }
     }
 
@@ -4009,6 +4018,10 @@ export default function Page() {
     if (deduped.length === 0) {
       setAdminGateUsersStatus(
         "No stored user records found for this gate yet, and no recent successful check transactions could be inferred."
+      );
+    } else if (usedTransactionFallback && hasStoredRecordMatches) {
+      setAdminGateUsersStatus(
+        `Loaded ${deduped.length} user(s). Passing: ${passedCount}. Included ${inferredTransactionUserCount} transaction-inferred check(s). Last update: ${deduped[0].checkedAtLabel}.`
       );
     } else if (usedTransactionFallback) {
       setAdminGateUsersStatus(

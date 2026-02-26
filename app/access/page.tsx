@@ -79,6 +79,7 @@ interface MemberCheckState {
   passed?: boolean;
   verificationMode?: "transaction" | "rpc";
   checkedAtLabel?: string;
+  identityVerifiedAtLabel?: string;
   verificationSlot?: number;
   gateExplorerUrl?: string;
   userExplorerUrl?: string;
@@ -2967,6 +2968,7 @@ export default function AccessPage() {
       const checkedAtLabel = new Date().toLocaleString();
       const gateExplorerUrl = explorerAddressLink(gatePda.toBase58(), rpcEndpoint);
       const userExplorerUrl = explorerAddressLink(params.user.toBase58(), rpcEndpoint);
+      let identityVerifiedAtLabel: string | undefined;
       const proofItems: VerificationProofItem[] = [
         {
           label: "Gate account",
@@ -2992,6 +2994,17 @@ export default function AccessPage() {
           address: params.identityAccount.toBase58(),
           url: explorerAddressLink(params.identityAccount.toBase58(), rpcEndpoint)
         });
+        try {
+          const identityInfo = await connection.getAccountInfo(params.identityAccount);
+          if (identityInfo) {
+            const parsedIdentity = parseVerificationIdentityData(identityInfo.data);
+            if (parsedIdentity && parsedIdentity.verifiedAt > 0) {
+              identityVerifiedAtLabel = new Date(parsedIdentity.verifiedAt * 1000).toLocaleString();
+            }
+          }
+        } catch {
+          // Ignore identity timestamp read failures; check flow can proceed without it.
+        }
       }
       if (params.linkAccount) {
         proofItems.push({
@@ -3083,6 +3096,7 @@ export default function AccessPage() {
         passed,
         verificationMode: shouldStoreRecord ? "transaction" : "rpc",
         checkedAtLabel,
+        identityVerifiedAtLabel,
         verificationSlot,
         gateExplorerUrl,
         userExplorerUrl,
@@ -4165,6 +4179,11 @@ export default function AccessPage() {
                     {typeof memberCheck.verificationSlot === "number"
                       ? ` (slot ${memberCheck.verificationSlot})`
                       : ""}
+                  </Typography>
+                )}
+                {memberCheck.identityVerifiedAtLabel && (
+                  <Typography variant="caption" color="text.secondary">
+                    Identity verified at: {memberCheck.identityVerifiedAtLabel}
                   </Typography>
                 )}
                 <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
