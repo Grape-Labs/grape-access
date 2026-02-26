@@ -6949,55 +6949,53 @@ export default function Page() {
           </Paper>
         </Grid>
 
-        <Grid size={{ xs: 12 }}>
-          <Paper className="panel" sx={{ p: 2.5 }}>
-            <Typography variant="h6" sx={{ mb: 1.5 }}>
-              Activity
-            </Typography>
-            {activity.length === 0 && (
-              <Typography color="text.secondary">
-                No transactions yet. Initialize or check a gate to populate activity.
+        {activity.length > 0 && (
+          <Grid size={{ xs: 12 }}>
+            <Paper className="panel" sx={{ p: 2.5 }}>
+              <Typography variant="h6" sx={{ mb: 1.5 }}>
+                Activity
               </Typography>
-            )}
-            <Stack spacing={1.4}>
-              {activity.slice(0, 5).map((item) => (
-                <Paper key={`${item.createdAt}-${item.label}`} variant="outlined" sx={{ p: 1.5 }}>
-                  <Stack direction={{ xs: "column", md: "row" }} spacing={1} justifyContent="space-between">
-                    <Box>
-                      <Typography variant="subtitle2">{item.label}</Typography>
-                      <Typography variant="body2" color="text.secondary">
-                        {item.message}
-                      </Typography>
-                    </Box>
-                    <Box>
-                      <Typography className="mono" sx={{ fontSize: "0.76rem", color: "text.secondary" }}>
-                        {new Date(item.createdAt).toLocaleString()}
-                      </Typography>
-                      {item.signature && (
-                        <Stack direction="row" spacing={0.8} justifyContent={{ xs: "flex-start", md: "flex-end" }}>
-                          <Button
-                            size="small"
-                            href={explorerLink(item.signature, cluster)}
-                            target="_blank"
-                            rel="noreferrer"
+              <Stack spacing={1.4}>
+                {activity.slice(0, 5).map((item) => (
+                  <Paper key={`${item.createdAt}-${item.label}`} variant="outlined" sx={{ p: 1.5 }}>
+                    <Stack direction={{ xs: "column", md: "row" }} spacing={1} justifyContent="space-between">
+                      <Box>
+                        <Typography variant="subtitle2">{item.label}</Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          {item.message}
+                        </Typography>
+                      </Box>
+                      <Box>
+                        <Typography className="mono" sx={{ fontSize: "0.76rem", color: "text.secondary" }}>
+                          {new Date(item.createdAt).toLocaleString()}
+                        </Typography>
+                        {item.signature && (
+                          <Stack
+                            direction="row"
+                            spacing={0.8}
+                            justifyContent={{ xs: "flex-start", md: "flex-end" }}
                           >
-                            View
-                          </Button>
-                          <Button
-                            size="small"
-                            onClick={() => void copyText(item.signature ?? "")}
-                          >
-                            Copy Sig
-                          </Button>
-                        </Stack>
-                      )}
-                    </Box>
-                  </Stack>
-                </Paper>
-              ))}
-            </Stack>
-          </Paper>
-        </Grid>
+                            <Button
+                              size="small"
+                              href={explorerLink(item.signature, cluster)}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              View
+                            </Button>
+                            <Button size="small" onClick={() => void copyText(item.signature ?? "")}>
+                              Copy Sig
+                            </Button>
+                          </Stack>
+                        )}
+                      </Box>
+                    </Stack>
+                  </Paper>
+                ))}
+              </Stack>
+            </Paper>
+          </Grid>
+        )}
       </Grid>
 
       <Dialog
