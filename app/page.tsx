@@ -3259,18 +3259,46 @@ export default function Page() {
         storeRecord: effectiveForm.storeRecord
       };
 
-      const result = await executeSdkMethod({
-        action: "check",
-        params,
-        connection,
-        wallet: wallet as unknown as WalletProvider
-      });
+      const client = await getMemberClient();
+      const checkMethod = getSdkClientMethod<((arg: unknown) => unknown)>(client, [
+        "checkAccess",
+        "checkGate"
+      ]);
+      const simulateMethod = getSdkClientMethod<((arg: unknown) => unknown)>(client, [
+        "simulateCheckAccess",
+        "simulateCheckGate"
+      ]);
 
-      const signature = extractSignature(result);
-      const passed = extractPassStatus(result) ?? true;
+      const shouldStoreRecord = Boolean(effectiveForm.storeRecord);
+      let result: unknown;
+      let signature: string | undefined;
+      let passed: boolean;
+      if (shouldStoreRecord) {
+        if (!checkMethod) {
+          throw new Error("SDK client is missing checkAccess/checkGate.");
+        }
+        result = await Promise.resolve(checkMethod.call(client, params));
+        signature = extractSignature(result);
+        // On-chain check_access/check_gate returns an error when not passed.
+        passed = extractPassStatus(result) ?? true;
+      } else {
+        if (!simulateMethod) {
+          throw new Error(
+            "SDK client is missing simulateCheckAccess/simulateCheckGate. Update @grapenpm/grape-access-sdk."
+          );
+        }
+        result = await Promise.resolve(simulateMethod.call(client, params));
+        if (typeof result === "boolean") {
+          passed = result;
+        } else {
+          passed = extractPassStatus(result) ?? true;
+        }
+      }
       const resultMessage =
         passed === true
-          ? "Access granted for this gate."
+          ? shouldStoreRecord
+            ? "Access granted for this gate."
+            : "Access granted (RPC simulation, no transaction sent)."
           : passed === false
             ? "Access not granted for this gate."
             : signature

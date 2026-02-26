@@ -2918,22 +2918,46 @@ export default function AccessPage() {
 
       const client = await getClient();
       latestClient = client;
-      const method = getSdkClientMethod<((arg: unknown) => unknown)>(client, [
+      const checkMethod = getSdkClientMethod<((arg: unknown) => unknown)>(client, [
         "checkAccess",
         "checkGate"
       ]);
-      if (!method) {
-        throw new Error("SDK client is missing checkAccess/checkGate.");
-      }
+      const simulateMethod = getSdkClientMethod<((arg: unknown) => unknown)>(client, [
+        "simulateCheckAccess",
+        "simulateCheckGate"
+      ]);
 
-      const result = await Promise.resolve(method.call(client, params));
-      const signature = extractSignature(result);
-      // On-chain check_gate returns an error when the gate is not passed.
-      // So if rpc() succeeds, treat that as passed unless SDK explicitly returns false.
-      const passed = extractPassStatus(result) ?? true;
+      const shouldStoreRecord = Boolean(effectiveForm.storeRecord);
+      let result: unknown;
+      let signature: string | undefined;
+      let passed: boolean;
+      if (shouldStoreRecord) {
+        if (!checkMethod) {
+          throw new Error("SDK client is missing checkAccess/checkGate.");
+        }
+        result = await Promise.resolve(checkMethod.call(client, params));
+        signature = extractSignature(result);
+        // On-chain check_gate returns an error when the gate is not passed.
+        // So if rpc() succeeds, treat that as passed unless SDK explicitly returns false.
+        passed = extractPassStatus(result) ?? true;
+      } else {
+        if (!simulateMethod) {
+          throw new Error(
+            "SDK client is missing simulateCheckAccess/simulateCheckGate. Update @grapenpm/grape-access-sdk."
+          );
+        }
+        result = await Promise.resolve(simulateMethod.call(client, params));
+        if (typeof result === "boolean") {
+          passed = result;
+        } else {
+          passed = extractPassStatus(result) ?? true;
+        }
+      }
       const resultMessage =
         passed === true
-          ? "Access granted for this gate."
+          ? shouldStoreRecord
+            ? "Access granted for this gate."
+            : "Access granted (RPC simulation, no transaction sent)."
           : passed === false
             ? "Access not granted for this gate."
             : signature
