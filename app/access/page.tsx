@@ -77,7 +77,19 @@ interface MemberCheckState {
   message: string;
   signature?: string;
   passed?: boolean;
+  verificationMode?: "transaction" | "rpc";
+  checkedAtLabel?: string;
+  verificationSlot?: number;
+  gateExplorerUrl?: string;
+  userExplorerUrl?: string;
+  proofItems?: VerificationProofItem[];
   response?: unknown;
+}
+
+interface VerificationProofItem {
+  label: string;
+  address: string;
+  url: string;
 }
 
 interface MemberDeriveState {
@@ -850,6 +862,8 @@ async function simulateInstructionWithFeePayer(args: {
   const { connection, feePayer, instruction } = args;
   const transaction = new Transaction().add(instruction);
   transaction.feePayer = feePayer;
+  const latestBlockhash = await connection.getLatestBlockhash("processed");
+  transaction.recentBlockhash = latestBlockhash.blockhash;
   return connection.simulateTransaction(transaction);
 }
 
@@ -955,6 +969,26 @@ function extractPassStatus(result: unknown): boolean | undefined {
   return undefined;
 }
 
+function hasCustomProgramErrorCode(value: unknown, code: number): boolean {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  if (typeof value === "number") {
+    return value === code;
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasCustomProgramErrorCode(entry, code));
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.Custom === "number" && record.Custom === code) {
+      return true;
+    }
+    return Object.values(record).some((entry) => hasCustomProgramErrorCode(entry, code));
+  }
+  return false;
+}
+
 function toDisplayValue(value: unknown): unknown {
   if (value === null || value === undefined) {
     return value;
@@ -1003,6 +1037,22 @@ function explorerLink(signature: string, endpoint: string) {
     return base;
   }
   return `${base}?cluster=${cluster}`;
+}
+
+function explorerAddressLink(address: string, endpoint: string) {
+  const base = `https://explorer.solana.com/address/${address}`;
+  const cluster = inferClusterFromEndpoint(endpoint);
+  if (cluster === "mainnet-beta") {
+    return base;
+  }
+  return `${base}?cluster=${cluster}`;
+}
+
+function shortenAddress(address: string, start = 4, end = 4) {
+  if (!address || address.length <= start + end + 3) {
+    return address;
+  }
+  return `${address.slice(0, start)}...${address.slice(-end)}`;
 }
 
 function endpointForCluster(cluster: ClusterKind, customRpc: string) {
@@ -2916,22 +2966,63 @@ export default function AccessPage() {
         throw new Error(`Check input validation failed. ${validationIssues.join(" ")}`);
       }
 
-      const client = await getClient();
-      latestClient = client;
-      const checkMethod = getSdkClientMethod<((arg: unknown) => unknown)>(client, [
-        "checkAccess",
-        "checkGate"
-      ]);
-      const simulateMethod = getSdkClientMethod<((arg: unknown) => unknown)>(client, [
-        "simulateCheckAccess",
-        "simulateCheckGate"
-      ]);
-
       const shouldStoreRecord = Boolean(effectiveForm.storeRecord);
+      const [gatePda] = await findPrimaryAccessPda(params.gateId, GPASS_PROGRAM_ID);
+      const checkedAtLabel = new Date().toLocaleString();
+      const gateExplorerUrl = explorerAddressLink(gatePda.toBase58(), rpcEndpoint);
+      const userExplorerUrl = explorerAddressLink(params.user.toBase58(), rpcEndpoint);
+      const proofItems: VerificationProofItem[] = [
+        {
+          label: "Gate account",
+          address: gatePda.toBase58(),
+          url: gateExplorerUrl
+        },
+        {
+          label: "User wallet",
+          address: params.user.toBase58(),
+          url: userExplorerUrl
+        }
+      ];
+      if (params.reputationAccount) {
+        proofItems.push({
+          label: "Reputation account",
+          address: params.reputationAccount.toBase58(),
+          url: explorerAddressLink(params.reputationAccount.toBase58(), rpcEndpoint)
+        });
+      }
+      if (params.identityAccount) {
+        proofItems.push({
+          label: "Identity account",
+          address: params.identityAccount.toBase58(),
+          url: explorerAddressLink(params.identityAccount.toBase58(), rpcEndpoint)
+        });
+      }
+      if (params.linkAccount) {
+        proofItems.push({
+          label: "Link account",
+          address: params.linkAccount.toBase58(),
+          url: explorerAddressLink(params.linkAccount.toBase58(), rpcEndpoint)
+        });
+      }
+      if (params.tokenAccount) {
+        proofItems.push({
+          label: "Token account",
+          address: params.tokenAccount.toBase58(),
+          url: explorerAddressLink(params.tokenAccount.toBase58(), rpcEndpoint)
+        });
+      }
+
       let result: unknown;
       let signature: string | undefined;
       let passed: boolean;
+      let verificationSlot: number | undefined;
       if (shouldStoreRecord) {
+        const client = await getClient();
+        latestClient = client;
+        const checkMethod = getSdkClientMethod<((arg: unknown) => unknown)>(client, [
+          "checkAccess",
+          "checkGate"
+        ]);
         if (!checkMethod) {
           throw new Error("SDK client is missing checkAccess/checkGate.");
         }
@@ -2941,17 +3032,42 @@ export default function AccessPage() {
         // So if rpc() succeeds, treat that as passed unless SDK explicitly returns false.
         passed = extractPassStatus(result) ?? true;
       } else {
-        if (!simulateMethod) {
-          throw new Error(
-            "SDK client is missing simulateCheckAccess/simulateCheckGate. Update @grapenpm/grape-access-sdk."
-          );
+        const readOnlyClient = await getClient({ readOnly: true });
+        latestClient = readOnlyClient;
+        const buildInstruction = getSdkClientMethod<((arg: unknown) => Promise<TransactionInstruction>)>(
+          readOnlyClient,
+          ["buildCheckAccessInstruction", "buildCheckGateInstruction"]
+        );
+        if (!buildInstruction) {
+          throw new Error("SDK client is missing buildCheckAccessInstruction/buildCheckGateInstruction.");
         }
-        result = await Promise.resolve(simulateMethod.call(client, params));
-        if (typeof result === "boolean") {
-          passed = result;
+        const instruction = await buildInstruction.call(readOnlyClient, {
+          ...params,
+          storeRecord: false
+        });
+        const simulation = await simulateInstructionWithFeePayer({
+          connection,
+          feePayer: params.user,
+          instruction
+        });
+        verificationSlot = simulation.context.slot;
+        const simulationErr = simulation.value.err;
+        if (!simulationErr) {
+          passed = true;
+        } else if (hasCustomProgramErrorCode(simulationErr, 6002)) {
+          passed = false;
         } else {
-          passed = extractPassStatus(result) ?? true;
+          const logs = simulation.value.logs ?? [];
+          const logSummary = logs.length > 0 ? ` Logs: ${logs.join(" | ")}` : "";
+          throw new Error(`RPC simulation failed: ${JSON.stringify(simulationErr)}.${logSummary}`);
         }
+        result = {
+          mode: "rpc-simulation",
+          slot: simulation.context.slot,
+          err: simulationErr,
+          logs: simulation.value.logs ?? [],
+          unitsConsumed: simulation.value.unitsConsumed ?? null
+        };
       }
       const resultMessage =
         passed === true
@@ -2969,6 +3085,12 @@ export default function AccessPage() {
         message: resultMessage,
         signature,
         passed,
+        verificationMode: shouldStoreRecord ? "transaction" : "rpc",
+        checkedAtLabel,
+        verificationSlot,
+        gateExplorerUrl,
+        userExplorerUrl,
+        proofItems,
         response: toDisplayValue(result)
       });
 
@@ -4038,6 +4160,17 @@ export default function AccessPage() {
                 {gateContext.profile.supportLabel && (
                   <Typography color="text.secondary">{gateContext.profile.supportLabel}</Typography>
                 )}
+                {memberCheck.checkedAtLabel && (
+                  <Typography variant="caption" color="text.secondary">
+                    {memberCheck.verificationMode === "rpc"
+                      ? "Verified via RPC"
+                      : "Verified on-chain"}
+                    {`: ${memberCheck.checkedAtLabel}`}
+                    {typeof memberCheck.verificationSlot === "number"
+                      ? ` (slot ${memberCheck.verificationSlot})`
+                      : ""}
+                  </Typography>
+                )}
                 <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
                   {ctaActions.map((action) => (
                     <Button
@@ -4070,7 +4203,50 @@ export default function AccessPage() {
                       View Transaction
                     </Button>
                   )}
+                  {!memberCheck.signature && memberCheck.gateExplorerUrl && (
+                    <Button
+                      href={memberCheck.gateExplorerUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      variant="text"
+                    >
+                      View Gate
+                    </Button>
+                  )}
+                  {!memberCheck.signature && memberCheck.userExplorerUrl && (
+                    <Button
+                      href={memberCheck.userExplorerUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      variant="text"
+                    >
+                      View Wallet
+                    </Button>
+                  )}
                 </Stack>
+                {memberCheck.proofItems && memberCheck.proofItems.length > 0 && (
+                  <Stack spacing={0.45}>
+                    <Typography variant="caption" color="text.secondary">
+                      Verification proof accounts
+                    </Typography>
+                    <Stack direction="row" spacing={0.6} flexWrap="wrap" useFlexGap>
+                      {memberCheck.proofItems.map((item) => (
+                        <Button
+                          key={`${item.label}:${item.address}`}
+                          href={item.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          variant="text"
+                          size="small"
+                          title={`${item.label}: ${item.address}`}
+                          sx={{ minWidth: 0, px: 0.6, py: 0.2, textTransform: "none", fontSize: "0.74rem" }}
+                        >
+                          {item.label}: {shortenAddress(item.address)}
+                        </Button>
+                      ))}
+                    </Stack>
+                  </Stack>
+                )}
               </Stack>
             </Paper>
           )}
