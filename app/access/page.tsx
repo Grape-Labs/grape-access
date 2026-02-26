@@ -166,12 +166,8 @@ const DEFAULT_COMMUNITY_PROFILE: CommunityProfile = {
   bannerUrl: "",
   supportLabel: "Need help? Contact your community moderators.",
   supportUrl: "",
-  passActions: [
-    { label: "Open Community Hub", href: "https://grapedao.org" }
-  ],
-  failActions: [
-    { label: "Community Help Center", href: "https://grapedao.org" }
-  ]
+  passActions: [],
+  failActions: []
 };
 
 const COMMUNITY_PROFILES_BY_GATE: Record<string, CommunityProfile> = {
