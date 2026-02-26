@@ -249,7 +249,7 @@ const defaultMemberForm: MemberFormState = {
   identityAccount: "",
   linkAccount: "",
   tokenAccount: "",
-  storeRecord: false
+  storeRecord: true
 };
 
 function parsePublicKey(label: string, raw: string, required: boolean) {
