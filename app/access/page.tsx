@@ -3035,6 +3035,11 @@ export default function AccessPage() {
     setMemberBusy(true);
     let latestCheckParams: CheckGateInputParams | null = null;
     let latestClient: Record<string, unknown> | null = null;
+    let attemptedOnChainTx = false;
+    let gateExplorerUrlForRecovery: string | undefined;
+    let userExplorerUrlForRecovery: string | undefined;
+    let proofItemsForRecovery: VerificationProofItem[] | undefined;
+    let identityVerifiedAtLabelForRecovery: string | undefined;
     try {
       const derivedForm = await handleAutoDeriveMemberAccounts({ silent: true });
       if (!derivedForm) {
@@ -3130,26 +3135,54 @@ export default function AccessPage() {
           url: explorerAddressLink(params.tokenAccount.toBase58(), rpcEndpoint)
         });
       }
+      gateExplorerUrlForRecovery = gateExplorerUrl;
+      userExplorerUrlForRecovery = userExplorerUrl;
+      proofItemsForRecovery = proofItems;
+      identityVerifiedAtLabelForRecovery = identityVerifiedAtLabel;
 
       let result: unknown;
       let signature: string | undefined;
       let passed: boolean;
       let verificationSlot: number | undefined;
       if (shouldStoreRecord) {
+        attemptedOnChainTx = true;
         const client = await getClient();
         latestClient = client;
-        const checkMethod = getSdkClientMethod<((arg: unknown) => unknown)>(client, [
-          "checkAccess",
-          "checkGate"
-        ]);
-        if (!checkMethod) {
-          throw new Error("SDK client is missing checkAccess/checkGate.");
+        const buildInstruction = getSdkClientMethod<((arg: unknown) => Promise<TransactionInstruction>)>(
+          client,
+          ["buildCheckAccessInstruction", "buildCheckGateInstruction"]
+        );
+        if (buildInstruction) {
+          const instruction = await buildInstruction.call(client, {
+            ...params,
+            storeRecord: true
+          });
+          signature = await sendInstructionWithWallet({
+            connection,
+            wallet: wallet as unknown as WalletProvider,
+            instruction
+          });
+          result = {
+            mode: "transaction",
+            signature
+          };
+          passed = true;
+        } else {
+          const checkMethod = getSdkClientMethod<((arg: unknown) => unknown)>(client, [
+            "checkAccess",
+            "checkGate"
+          ]);
+          if (!checkMethod) {
+            throw new Error(
+              "SDK client is missing checkAccess/checkGate and buildCheckAccessInstruction/buildCheckGateInstruction."
+            );
+          }
+          result = await Promise.resolve(checkMethod.call(client, params));
+          signature = extractSignature(result);
+          // On-chain check_gate returns an error when the gate is not passed.
+          // So if rpc() succeeds, treat that as passed unless SDK explicitly returns false.
+          passed = extractPassStatus(result) ?? true;
         }
-        result = await Promise.resolve(checkMethod.call(client, params));
-        signature = extractSignature(result);
-        // On-chain check_gate returns an error when the gate is not passed.
-        // So if rpc() succeeds, treat that as passed unless SDK explicitly returns false.
-        passed = extractPassStatus(result) ?? true;
       } else {
         const readOnlyClient = await getClient({ readOnly: true });
         latestClient = readOnlyClient;
@@ -3219,6 +3252,73 @@ export default function AccessPage() {
         passed === false ? "info" : "success"
       );
     } catch (error) {
+      if (attemptedOnChainTx && connection) {
+        const recoveredSignature = extractSignature(error);
+        if (recoveredSignature) {
+          let recoveredStatus:
+            | {
+                slot: number;
+              }
+            | undefined;
+          for (let attempt = 0; attempt < 4; attempt += 1) {
+            try {
+              const statusResponse = await connection.getSignatureStatuses([recoveredSignature], {
+                searchTransactionHistory: true
+              });
+              const status = statusResponse.value[0];
+              if (status && !status.err) {
+                recoveredStatus = { slot: status.slot };
+                break;
+              }
+              if (status?.err) {
+                break;
+              }
+            } catch {
+              // Retry on transient RPC issues.
+            }
+            await new Promise((resolve) => setTimeout(resolve, 700));
+          }
+
+          if (recoveredStatus) {
+            let checkedAtLabel = new Date().toLocaleString();
+            try {
+              const txInfo = await connection.getParsedTransaction(recoveredSignature, {
+                commitment: "confirmed",
+                maxSupportedTransactionVersion: 0
+              });
+              if (txInfo?.blockTime) {
+                checkedAtLabel = new Date(txInfo.blockTime * 1000).toLocaleString();
+              }
+            } catch {
+              // Keep fallback local timestamp label.
+            }
+
+            const recoveredMessage =
+              "Access granted for this gate (transaction confirmed on-chain).";
+            setMemberCheck({
+              status: "success",
+              message: recoveredMessage,
+              signature: recoveredSignature,
+              passed: true,
+              verificationMode: "transaction",
+              checkedAtLabel,
+              identityVerifiedAtLabel: identityVerifiedAtLabelForRecovery,
+              verificationSlot: recoveredStatus.slot,
+              gateExplorerUrl: gateExplorerUrlForRecovery,
+              userExplorerUrl: userExplorerUrlForRecovery,
+              proofItems: proofItemsForRecovery,
+              response: toDisplayValue({
+                mode: "transaction-recovered",
+                signature: recoveredSignature,
+                slot: recoveredStatus.slot
+              })
+            });
+            notify("Transaction confirmed on-chain.", "success");
+            return;
+          }
+        }
+      }
+
       let message = await formatCheckGateError(error, connection);
 
       let borshDetected = false;
