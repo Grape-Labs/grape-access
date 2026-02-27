@@ -79,6 +79,7 @@ type GateTypeKind = "singleUse" | "reusable" | "timeLimited" | "subscription";
 type ClusterKind = "devnet" | "testnet" | "mainnet-beta" | "custom";
 type AccessCheckMode = "simple" | "advanced";
 type AccessBuilderMode = "simple" | "advanced";
+type AdminUserSourceMode = "onchain" | "transactions";
 type GateEditorMode = "create" | "edit";
 const SHYFT_MAINNET_RPC =
   process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC?.trim() ||
@@ -195,6 +196,7 @@ interface MemberDeriveState {
 interface AdminFormState {
   authorityFilter: string;
   selectedGateId: string;
+  usersSource: AdminUserSourceMode;
   metadataUri: string;
   setActiveValue: boolean;
   newAuthority: string;
@@ -441,6 +443,7 @@ const defaultMemberForm: MemberFormState = {
 const defaultAdminForm: AdminFormState = {
   authorityFilter: "",
   selectedGateId: "",
+  usersSource: "onchain",
   metadataUri: "",
   setActiveValue: true,
   newAuthority: "",
@@ -2428,7 +2431,7 @@ export default function Page() {
   useEffect(() => {
     setAdminGateUsers([]);
     setAdminGateUsersStatus("No users loaded yet.");
-  }, [adminForm.selectedGateId]);
+  }, [adminForm.selectedGateId, adminForm.usersSource]);
 
   const appendActivity = (entry: { label: string; message: string; signature?: string }) => {
     setActivity((prev) => [{ ...entry, createdAt: Date.now() }, ...prev]);
@@ -4270,9 +4273,11 @@ export default function Page() {
 
   const loadGateUsers = async ({
     gateIdInput,
+    sourceMode,
     showSuccessToast = true
   }: {
     gateIdInput?: string;
+    sourceMode?: AdminUserSourceMode;
     showSuccessToast?: boolean;
   } = {}) => {
     const gateId = parsePublicKey("Selected gate", gateIdInput ?? adminForm.selectedGateId, true)!;
@@ -4296,13 +4301,13 @@ export default function Page() {
       clientAny.program?.account?.gateCheckRecord;
 
     const records: AdminGateUserItem[] = [];
-    let hasStoredRecordMatches = false;
-    let usedTransactionFallback = false;
-    let inferredTransactionUserCount = 0;
+    const loadMode = sourceMode ?? adminForm.usersSource;
+    const useOnChainSource = loadMode === "onchain";
+    const useTransactionSource = loadMode === "transactions";
     const allMethod =
       checkRecordAccountClient?.all as ((filters?: unknown[]) => Promise<unknown[]>) | undefined;
 
-    if (typeof allMethod === "function") {
+    if (useOnChainSource && typeof allMethod === "function") {
       try {
         const fetchedByPda = new Map<string, any>();
         for (const candidate of recordOwnerCandidates) {
@@ -4349,15 +4354,12 @@ export default function Page() {
             checkedAtLabel: formatCheckedAt(checkedAt)
           });
         }
-        if (records.length > 0) {
-          hasStoredRecordMatches = true;
-        }
       } catch {
         // Fall through to raw scan fallback.
       }
     }
 
-    if (typeof allMethod === "function" && records.length < 2) {
+    if (useOnChainSource && typeof allMethod === "function" && records.length < 2) {
       try {
         const fetchedAll = await allMethod.call(checkRecordAccountClient);
         const knownRecordPdas = new Set(records.map((entry) => entry.pda).filter((entry) => Boolean(entry)));
@@ -4394,15 +4396,12 @@ export default function Page() {
             knownRecordPdas.add(pda);
           }
         }
-        if (records.length > 0) {
-          hasStoredRecordMatches = true;
-        }
       } catch {
         // Ignore unfiltered SDK scan failures.
       }
     }
 
-    if (connection) {
+    if (useOnChainSource && connection) {
       const rawMatchesByPda = new Map<string, { pubkey: PublicKey; account: { data: Buffer } }>();
       for (const candidate of recordOwnerCandidates) {
         for (const ownerOffset of CHECK_RECORD_OWNER_OFFSETS) {
@@ -4459,12 +4458,9 @@ export default function Page() {
         });
         knownRecordPdas.add(entry.pubkey.toBase58());
       }
-      if (records.length > 0) {
-        hasStoredRecordMatches = true;
-      }
     }
 
-    if (connection && records.length < 2) {
+    if (useOnChainSource && connection && records.length < 2) {
       try {
         const exhaustiveByPda = new Map<string, { pubkey: PublicKey; account: { data: Buffer } }>();
         for (const dataSize of [83, 75]) {
@@ -4523,15 +4519,12 @@ export default function Page() {
           knownRecordPdas.add(pdaBase58);
         }
 
-        if (records.length > 0) {
-          hasStoredRecordMatches = true;
-        }
       } catch {
         // Ignore exhaustive fallback failures.
       }
     }
 
-    if (connection) {
+    if (useTransactionSource && connection) {
       const signatureTargets = [accessPda, legacyGatePda, gateId];
       const signatureMap = new Map<
         string,
@@ -4661,8 +4654,6 @@ export default function Page() {
 
       if (txUsers.size > 0) {
         records.push(...Array.from(txUsers.values()));
-        usedTransactionFallback = true;
-        inferredTransactionUserCount = txUsers.size;
       }
     }
 
@@ -4679,19 +4670,17 @@ export default function Page() {
     setAdminGateUsers(deduped);
     if (deduped.length === 0) {
       setAdminGateUsersStatus(
-        "No stored user records found for this gate yet, and no recent successful check transactions could be inferred."
+        loadMode === "transactions"
+          ? "No successful check transactions found for this gate in the scanned history."
+          : "No stored on-chain check records found for this gate yet."
       );
-    } else if (usedTransactionFallback && hasStoredRecordMatches) {
+    } else if (loadMode === "transactions") {
       setAdminGateUsersStatus(
-        `Loaded ${deduped.length} user(s). Passing: ${passedCount}. Included ${inferredTransactionUserCount} transaction-inferred check(s). Last update: ${deduped[0].checkedAtLabel}.`
-      );
-    } else if (usedTransactionFallback) {
-      setAdminGateUsersStatus(
-        `Loaded ${deduped.length} user(s) from successful check transactions. No stored check-record accounts were found.`
+        `Loaded ${deduped.length} user(s) from successful check transactions (inferred pass status). Last update: ${deduped[0].checkedAtLabel}.`
       );
     } else {
       setAdminGateUsersStatus(
-        `Loaded ${deduped.length} user(s). Passing: ${passedCount}. Last update: ${deduped[0].checkedAtLabel}.`
+        `Loaded ${deduped.length} user(s) from on-chain check records. Passing: ${passedCount}. Last update: ${deduped[0].checkedAtLabel}.`
       );
     }
 
@@ -4699,7 +4688,9 @@ export default function Page() {
       notify(
         deduped.length
           ? `Loaded ${deduped.length} connected user(s).`
-          : "No stored users found for this gate.",
+          : loadMode === "transactions"
+            ? "No successful check transactions found for this gate."
+            : "No stored on-chain users found for this gate.",
         "success"
       );
     }
@@ -6940,6 +6931,22 @@ export default function Page() {
                       </Select>
                       <FormHelperText>Optional quick picker from the loaded gate list.</FormHelperText>
                     </FormControl>
+                    <FormControl fullWidth>
+                      <InputLabel>Connected Users Source</InputLabel>
+                      <Select
+                        label="Connected Users Source"
+                        value={adminForm.usersSource}
+                        onChange={(event) =>
+                          updateAdminForm("usersSource", event.target.value as AdminUserSourceMode)
+                        }
+                      >
+                        <MenuItem value="onchain">On-chain check records</MenuItem>
+                        <MenuItem value="transactions">Successful check transactions</MenuItem>
+                      </Select>
+                      <FormHelperText>
+                        On-chain mode reads stored check records. Transaction mode infers pass status from successful check instructions.
+                      </FormHelperText>
+                    </FormControl>
 
                     <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
                       <Button
@@ -7162,7 +7169,10 @@ export default function Page() {
                         </Typography>
                         {adminGateUsers.length === 0 ? (
                           <Typography variant="body2" color="text.secondary">
-                            Press "Load Connected Users" to fetch latest stored check records.
+                            Press "Load Connected Users" to fetch users from{" "}
+                            {adminForm.usersSource === "transactions"
+                              ? "successful check transactions."
+                              : "stored on-chain check records."}
                           </Typography>
                         ) : (
                           <Stack spacing={0.8}>
