@@ -2437,6 +2437,73 @@ export default function Page() {
     setActivity((prev) => [{ ...entry, createdAt: Date.now() }, ...prev]);
   };
 
+  const handleExportConnectedUsersCsv = () => {
+    if (adminGateUsers.length === 0) {
+      notify("No connected users loaded to export.", "info");
+      return;
+    }
+    if (typeof window === "undefined") {
+      notify("CSV export is only available in the browser.", "error");
+      return;
+    }
+
+    const csvEscape = (value: string | number | boolean) => {
+      const text = String(value);
+      if (/[",\n]/.test(text)) {
+        return `"${text.replace(/"/g, '""')}"`;
+      }
+      return text;
+    };
+
+    const rows = adminGateUsers.map((entry) => {
+      const source = entry.pda.startsWith("tx:") ? "transactions" : "onchain";
+      const proofId = entry.pda.startsWith("tx:") ? entry.pda.slice(3) : entry.pda;
+      const checkedAtIso =
+        Number.isFinite(entry.checkedAt) && entry.checkedAt > 0
+          ? new Date(entry.checkedAt * 1000).toISOString()
+          : "";
+      const explorer = entry.pda.startsWith("tx:")
+        ? explorerLink(entry.pda.slice(3), cluster)
+        : explorerAddressLink(entry.pda, cluster);
+
+      return [
+        adminForm.selectedGateId.trim(),
+        entry.user,
+        entry.passed,
+        entry.checkedAt,
+        checkedAtIso,
+        source,
+        proofId,
+        explorer
+      ];
+    });
+
+    const header = [
+      "gate_id",
+      "user_wallet",
+      "passed",
+      "checked_at_unix",
+      "checked_at_iso",
+      "source",
+      "proof_id",
+      "explorer_url"
+    ];
+    const lines = [header, ...rows].map((row) => row.map(csvEscape).join(","));
+    const csvContent = `\uFEFF${lines.join("\n")}`;
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const safeGateId = adminForm.selectedGateId.trim() || "gate";
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    link.href = url;
+    link.download = `connected-users-${safeGateId}-${timestamp}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+    notify(`Exported ${adminGateUsers.length} user(s) to CSV.`, "success");
+  };
+
   const getAdminClient = async ({ readOnly = false }: { readOnly?: boolean } = {}) => {
     if (!connection) {
       throw new Error("Choose a valid RPC endpoint first.");
@@ -7160,9 +7227,27 @@ export default function Page() {
                           <Typography variant="subtitle2" sx={{ color: "text.primary" }}>
                             Connected Users
                           </Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {adminGateUsers.length} loaded
-                          </Typography>
+                          <Stack direction="row" spacing={1} alignItems="center">
+                            <Typography variant="caption" color="text.secondary">
+                              {adminGateUsers.length} loaded
+                            </Typography>
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              onClick={handleExportConnectedUsersCsv}
+                              disabled={adminGateUsers.length === 0}
+                              sx={{
+                                minWidth: 0,
+                                px: 0.9,
+                                py: 0.15,
+                                lineHeight: 1.35,
+                                fontSize: "0.72rem",
+                                textTransform: "none"
+                              }}
+                            >
+                              Export CSV
+                            </Button>
+                          </Stack>
                         </Stack>
                         <Typography variant="caption" color="text.secondary">
                           {adminGateUsersStatus}
