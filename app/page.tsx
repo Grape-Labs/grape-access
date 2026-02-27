@@ -313,11 +313,14 @@ const gateTypeOptions: { value: GateTypeKind; label: string }[] = [
 ];
 
 const platformOptions = [
-  { label: "Discord", value: VerificationPlatform.Discord as number },
-  { label: "Telegram", value: VerificationPlatform.Telegram as number },
-  { label: "Twitter", value: VerificationPlatform.Twitter as number },
-  { label: "Email", value: VerificationPlatform.Email as number }
+  { label: "Discord", value: VerificationPlatform.Discord as number, icon: "D", bg: "#5865F2", fg: "#F6F8FF" },
+  { label: "Telegram", value: VerificationPlatform.Telegram as number, icon: "T", bg: "#2AABEE", fg: "#F6FEFF" },
+  { label: "X", value: VerificationPlatform.Twitter as number, icon: "X", bg: "#0f1218", fg: "#F5F7FA" },
+  { label: "Email", value: VerificationPlatform.Email as number, icon: "@", bg: "#1f2937", fg: "#EFF6FF" }
 ];
+const PLATFORM_LABELS: Record<number, string> = Object.fromEntries(
+  platformOptions.map((option) => [option.value, option.label])
+) as Record<number, string>;
 const PLATFORM_TAGS: Record<number, string> = {
   0: "discord",
   1: "telegram",
@@ -1588,18 +1591,22 @@ function getSdkClientMethod<T extends (...args: any[]) => any>(
 }
 
 function buildMetadataCriteriaSummary(form: CreateFormState): string[] {
+  const selectedPlatformLabels =
+    form.selectedPlatforms.length > 0
+      ? form.selectedPlatforms.map((platform) => PLATFORM_LABELS[platform] ?? `Platform ${platform}`).join(", ")
+      : "any";
   switch (form.criteriaKind) {
     case "combined":
       return [
         `Minimum reputation: ${form.minPoints} (season ${form.season})`,
-        `Verification platforms: ${form.selectedPlatforms.join(", ") || "any"}`,
+        `Verification platforms: ${selectedPlatformLabels}`,
         form.requireWalletLink ? "Wallet link required" : "Wallet link optional"
       ];
     case "minReputation":
       return [`Minimum reputation: ${form.minPoints} (season ${form.season})`];
     case "verifiedIdentity":
     case "verifiedWithWallet":
-      return [`Verification platforms: ${form.selectedPlatforms.join(", ") || "any"}`];
+      return [`Verification platforms: ${selectedPlatformLabels}`];
     case "timeLockedReputation":
       return [
         `Minimum reputation: ${form.minPoints} (season ${form.season})`,
@@ -5759,7 +5766,26 @@ export default function Page() {
                       >
                         {platformOptions.map((option) => (
                           <ToggleButton key={option.label} value={option.value}>
-                            {option.label}
+                            <Stack direction="row" spacing={0.7} alignItems="center">
+                              <Box
+                                sx={{
+                                  width: 18,
+                                  height: 18,
+                                  borderRadius: "50%",
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                  fontSize: "0.62rem",
+                                  fontWeight: 700,
+                                  lineHeight: 1,
+                                  backgroundColor: option.bg,
+                                  color: option.fg
+                                }}
+                              >
+                                {option.icon}
+                              </Box>
+                              <Box component="span">{option.label}</Box>
+                            </Stack>
                           </ToggleButton>
                         ))}
                       </ToggleButtonGroup>

@@ -186,8 +186,14 @@ const COMMUNITY_PROFILES_BY_GATE: Record<string, CommunityProfile> = {
 const PLATFORM_LABELS: Record<number, string> = {
   0: "Discord",
   1: "Telegram",
-  2: "Twitter",
+  2: "X",
   3: "Email"
+};
+const PLATFORM_VISUALS: Record<number, { icon: string; bg: string; fg: string }> = {
+  0: { icon: "D", bg: "#5865F2", fg: "#F6F8FF" },
+  1: { icon: "T", bg: "#2AABEE", fg: "#F6FEFF" },
+  2: { icon: "X", bg: "#0f1218", fg: "#F5F7FA" },
+  3: { icon: "@", bg: "#1f2937", fg: "#EFF6FF" }
 };
 const PLATFORM_TAGS: Record<number, string> = {
   0: "discord",
@@ -1822,6 +1828,10 @@ function formatPlatformList(platforms: number[]) {
     return "any supported platform";
   }
   return platforms.map((entry) => PLATFORM_LABELS[entry] ?? `Platform ${entry}`).join(", ");
+}
+
+function formatPlatformLabel(platform: number) {
+  return PLATFORM_LABELS[platform] ?? `Platform ${platform}`;
 }
 
 function renderEligibilitySummary(criteriaVariant?: { type: string; config: Record<string, unknown> }) {
@@ -3667,6 +3677,16 @@ export default function AccessPage() {
       : memberCheck.passed === false
         ? gateContext.profile.failActions
         : [];
+  const gateVerificationPlatforms = useMemo(() => {
+    if (!gateContext.criteriaVariant) {
+      return [] as number[];
+    }
+    const type = gateContext.criteriaVariant.type;
+    if (type !== "verifiedIdentity" && type !== "verifiedWithWallet" && type !== "combined") {
+      return [] as number[];
+    }
+    return normalizePlatforms(gateContext.criteriaVariant.config.platforms);
+  }, [gateContext.criteriaVariant]);
   const requiresIdentityVerification =
     gateContext.criteriaVariant?.type === "verifiedIdentity" ||
     gateContext.criteriaVariant?.type === "verifiedWithWallet" ||
@@ -3957,6 +3977,53 @@ export default function AccessPage() {
                 </Typography>
               ))}
             </Stack>
+            {gateVerificationPlatforms.length > 0 && (
+              <Stack direction="row" spacing={0.8} useFlexGap flexWrap="wrap" sx={{ mt: 1.2 }}>
+                {gateVerificationPlatforms.map((platform) => {
+                  const visual = PLATFORM_VISUALS[platform] ?? {
+                    icon: "?",
+                    bg: "rgba(109, 184, 255, 0.22)",
+                    fg: "#EEF5FF"
+                  };
+                  return (
+                    <Box
+                      key={`platform-${platform}`}
+                      sx={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 0.7,
+                        px: 1,
+                        py: 0.45,
+                        borderRadius: 999,
+                        border: "1px solid rgba(109, 184, 255, 0.25)",
+                        backgroundColor: "rgba(12, 18, 30, 0.68)"
+                      }}
+                    >
+                      <Box
+                        sx={{
+                          width: 18,
+                          height: 18,
+                          borderRadius: "50%",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: "0.62rem",
+                          fontWeight: 700,
+                          lineHeight: 1,
+                          backgroundColor: visual.bg,
+                          color: visual.fg
+                        }}
+                      >
+                        {visual.icon}
+                      </Box>
+                      <Typography sx={{ fontSize: "0.76rem", color: "text.secondary", fontWeight: 600 }}>
+                        {formatPlatformLabel(platform)}
+                      </Typography>
+                    </Box>
+                  );
+                })}
+              </Stack>
+            )}
           </Paper>
           {gateContext.status === "ready" && requiresIdentityVerification && (
             <Alert
