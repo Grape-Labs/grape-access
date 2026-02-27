@@ -46,6 +46,8 @@ import {
 } from "@solana/web3.js";
 import { Buffer } from "buffer";
 import bs58 from "bs58";
+import { SiDiscord, SiTelegram, SiX } from "react-icons/si";
+import type { IconType } from "react-icons";
 import * as GPassSdk from "@grapenpm/grape-access-sdk";
 import * as GrapeVerificationRegistry from "@grapenpm/grape-verification-registry";
 import * as VineReputationClient from "@grapenpm/vine-reputation-client";
@@ -189,11 +191,16 @@ const PLATFORM_LABELS: Record<number, string> = {
   2: "X",
   3: "Email"
 };
-const PLATFORM_VISUALS: Record<number, { icon: string; bg: string; fg: string }> = {
-  0: { icon: "D", bg: "#5865F2", fg: "#F6F8FF" },
-  1: { icon: "T", bg: "#2AABEE", fg: "#F6FEFF" },
-  2: { icon: "X", bg: "#0f1218", fg: "#F5F7FA" },
-  3: { icon: "@", bg: "#1f2937", fg: "#EFF6FF" }
+const PLATFORM_ICONS: Record<number, IconType> = {
+  0: SiDiscord,
+  1: SiTelegram,
+  2: SiX
+};
+const PLATFORM_VISUALS: Record<number, { fallbackGlyph: string; bg: string; fg: string }> = {
+  0: { fallbackGlyph: "D", bg: "#5865F2", fg: "#F6F8FF" },
+  1: { fallbackGlyph: "T", bg: "#2AABEE", fg: "#F6FEFF" },
+  2: { fallbackGlyph: "X", bg: "#0f1218", fg: "#F5F7FA" },
+  3: { fallbackGlyph: "@", bg: "#1f2937", fg: "#EFF6FF" }
 };
 const PLATFORM_TAGS: Record<number, string> = {
   0: "discord",
@@ -3981,10 +3988,11 @@ export default function AccessPage() {
               <Stack direction="row" spacing={0.8} useFlexGap flexWrap="wrap" sx={{ mt: 1.2 }}>
                 {gateVerificationPlatforms.map((platform) => {
                   const visual = PLATFORM_VISUALS[platform] ?? {
-                    icon: "?",
+                    fallbackGlyph: "?",
                     bg: "rgba(109, 184, 255, 0.22)",
                     fg: "#EEF5FF"
                   };
+                  const PlatformIcon = PLATFORM_ICONS[platform];
                   return (
                     <Box
                       key={`platform-${platform}`}
@@ -4014,7 +4022,7 @@ export default function AccessPage() {
                           color: visual.fg
                         }}
                       >
-                        {visual.icon}
+                        {PlatformIcon ? <PlatformIcon size={11} /> : visual.fallbackGlyph}
                       </Box>
                       <Typography sx={{ fontSize: "0.76rem", color: "text.secondary", fontWeight: 600 }}>
                         {formatPlatformLabel(platform)}

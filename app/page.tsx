@@ -47,6 +47,8 @@ import { Buffer } from "buffer";
 import { AnchorProvider, BorshAccountsCoder } from "@coral-xyz/anchor";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useWallet } from "@solana/wallet-adapter-react";
+import { SiDiscord, SiTelegram, SiX } from "react-icons/si";
+import type { IconType } from "react-icons";
 import {
   Connection,
   Keypair,
@@ -312,11 +314,45 @@ const gateTypeOptions: { value: GateTypeKind; label: string }[] = [
   { value: "subscription", label: "Subscription" }
 ];
 
-const platformOptions = [
-  { label: "Discord", value: VerificationPlatform.Discord as number, icon: "D", bg: "#5865F2", fg: "#F6F8FF" },
-  { label: "Telegram", value: VerificationPlatform.Telegram as number, icon: "T", bg: "#2AABEE", fg: "#F6FEFF" },
-  { label: "X", value: VerificationPlatform.Twitter as number, icon: "X", bg: "#0f1218", fg: "#F5F7FA" },
-  { label: "Email", value: VerificationPlatform.Email as number, icon: "@", bg: "#1f2937", fg: "#EFF6FF" }
+const platformOptions: Array<{
+  label: string;
+  value: number;
+  icon?: IconType;
+  fallbackGlyph: string;
+  bg: string;
+  fg: string;
+}> = [
+  {
+    label: "Discord",
+    value: VerificationPlatform.Discord as number,
+    icon: SiDiscord,
+    fallbackGlyph: "D",
+    bg: "#5865F2",
+    fg: "#F6F8FF"
+  },
+  {
+    label: "Telegram",
+    value: VerificationPlatform.Telegram as number,
+    icon: SiTelegram,
+    fallbackGlyph: "T",
+    bg: "#2AABEE",
+    fg: "#F6FEFF"
+  },
+  {
+    label: "X",
+    value: VerificationPlatform.Twitter as number,
+    icon: SiX,
+    fallbackGlyph: "X",
+    bg: "#0f1218",
+    fg: "#F5F7FA"
+  },
+  {
+    label: "Email",
+    value: VerificationPlatform.Email as number,
+    fallbackGlyph: "@",
+    bg: "#1f2937",
+    fg: "#EFF6FF"
+  }
 ];
 const PLATFORM_LABELS: Record<number, string> = Object.fromEntries(
   platformOptions.map((option) => [option.value, option.label])
@@ -5764,30 +5800,33 @@ export default function Page() {
                         }
                         sx={{ flexWrap: "wrap", gap: 1 }}
                       >
-                        {platformOptions.map((option) => (
-                          <ToggleButton key={option.label} value={option.value}>
-                            <Stack direction="row" spacing={0.7} alignItems="center">
-                              <Box
-                                sx={{
-                                  width: 18,
-                                  height: 18,
-                                  borderRadius: "50%",
-                                  display: "inline-flex",
-                                  alignItems: "center",
-                                  justifyContent: "center",
-                                  fontSize: "0.62rem",
-                                  fontWeight: 700,
-                                  lineHeight: 1,
-                                  backgroundColor: option.bg,
-                                  color: option.fg
-                                }}
-                              >
-                                {option.icon}
-                              </Box>
-                              <Box component="span">{option.label}</Box>
-                            </Stack>
-                          </ToggleButton>
-                        ))}
+                        {platformOptions.map((option) => {
+                          const PlatformIcon = option.icon;
+                          return (
+                            <ToggleButton key={option.label} value={option.value}>
+                              <Stack direction="row" spacing={0.7} alignItems="center">
+                                <Box
+                                  sx={{
+                                    width: 18,
+                                    height: 18,
+                                    borderRadius: "50%",
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    fontSize: "0.62rem",
+                                    fontWeight: 700,
+                                    lineHeight: 1,
+                                    backgroundColor: option.bg,
+                                    color: option.fg
+                                  }}
+                                >
+                                  {PlatformIcon ? <PlatformIcon size={11} /> : option.fallbackGlyph}
+                                </Box>
+                                <Box component="span">{option.label}</Box>
+                              </Stack>
+                            </ToggleButton>
+                          );
+                        })}
                       </ToggleButtonGroup>
                     </Paper>
 
