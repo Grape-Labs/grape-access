@@ -131,7 +131,8 @@ interface GateContextState {
   status: "idle" | "loading" | "ready" | "error";
   message: string;
   gateId?: string;
-  daoId?: string;
+  reputationDaoId?: string;
+  verificationDaoId?: string;
   metadataUri?: string;
   criteriaVariant?: { type: string; config: Record<string, unknown> };
   gateTypeLabel?: string;
@@ -2091,19 +2092,17 @@ export default function AccessPage() {
     [gateContext.criteriaVariant]
   );
   const vineDaoLink = useMemo(() => {
-    if (!gateContext.daoId) {
+    if (!gateContext.reputationDaoId) {
       return "";
     }
-    return `https://vine.governance.so/dao/${gateContext.daoId}`;
-  }, [gateContext.daoId]);
+    return `https://vine.governance.so/dao/${gateContext.reputationDaoId}`;
+  }, [gateContext.reputationDaoId]);
   const verificationDaoLink = useMemo(() => {
-    if (!gateContext.daoId) {
+    if (!gateContext.verificationDaoId) {
       return "";
     }
-    const url = new URL("https://verification.governance.so/");
-    url.searchParams.set("dao_id", gateContext.daoId);
-    return url.toString();
-  }, [gateContext.daoId]);
+    return `https://verification.governance.so/dao/${gateContext.verificationDaoId}`;
+  }, [gateContext.verificationDaoId]);
 
   const progressStep = useMemo(() => {
     if (!isWalletConnected) {
@@ -2302,6 +2301,8 @@ export default function AccessPage() {
       ...prev,
       status: "loading",
       gateId: gateId.toBase58(),
+      reputationDaoId: undefined,
+      verificationDaoId: undefined,
       metadataUri: undefined,
       message: "Loading gate configuration...",
       profile: resolveCommunityProfile(gateId.toBase58())
@@ -2327,7 +2328,7 @@ export default function AccessPage() {
       const gateRecord = gate as Record<string, unknown>;
       const metadataUri =
         typeof gateRecord.metadataUri === "string" ? gateRecord.metadataUri.trim() : "";
-      let derivedDaoId: string | undefined;
+      let derivedVerificationDaoId: string | undefined;
       const grapeSpaceInput = asPublicKeyValue(criteriaVariant.config.grapeSpace);
       if (grapeSpaceInput) {
         try {
@@ -2342,11 +2343,26 @@ export default function AccessPage() {
               spaceData: resolvedVerificationSpace.spaceData
             });
             if (contexts.length > 0) {
-              derivedDaoId = contexts[0].daoId.toBase58();
+              derivedVerificationDaoId = contexts[0].daoId.toBase58();
             }
           }
         } catch {
           // Ignore DAO derivation failures; gate load should still succeed.
+        }
+      }
+      let derivedReputationDaoId: string | undefined;
+      const vineConfigInput = asPublicKeyValue(criteriaVariant.config.vineConfig);
+      if (vineConfigInput) {
+        try {
+          const configInfo = await connection.getAccountInfo(vineConfigInput);
+          if (configInfo && configInfo.owner.equals(VINE_REPUTATION_PROGRAM_ID)) {
+            const decodedConfig = await VineReputationClient.decodeReputationConfig(
+              configInfo.data
+            );
+            derivedReputationDaoId = decodedConfig.daoId.toBase58();
+          }
+        } catch {
+          // Ignore reputation DAO derivation failures; gate load should still succeed.
         }
       }
       let profileOverrides: Partial<CommunityProfile> = {};
@@ -2362,7 +2378,8 @@ export default function AccessPage() {
       setGateContext({
         status: "ready",
         gateId: gateId.toBase58(),
-        daoId: derivedDaoId,
+        reputationDaoId: derivedReputationDaoId,
+        verificationDaoId: derivedVerificationDaoId,
         metadataUri: metadataUri || undefined,
         message: `Gate loaded (RPC slot ${probeSlot}). Required accounts are auto-derived for access checks.`,
         criteriaVariant,
@@ -3748,6 +3765,9 @@ export default function AccessPage() {
     );
   }, [memberDerive.message, memberCheck.message]);
   const verificationPortalUrl = useMemo(() => {
+    if (gateContext.verificationDaoId) {
+      return `https://verification.governance.so/dao/${gateContext.verificationDaoId}`;
+    }
     const base = new URL("https://verification.governance.so");
     const grapeSpace = asPublicKeyValue(gateContext.criteriaVariant?.config.grapeSpace);
     if (grapeSpace) {
@@ -3757,7 +3777,7 @@ export default function AccessPage() {
       base.searchParams.set("gateId", memberForm.gateId.trim());
     }
     return base.toString();
-  }, [gateContext.criteriaVariant, memberForm.gateId]);
+  }, [gateContext.criteriaVariant, gateContext.verificationDaoId, memberForm.gateId]);
 
   return (
     <Container maxWidth="md" sx={{ py: { xs: 3, md: 5 } }} className="dramatic-shell">
@@ -3932,6 +3952,68 @@ export default function AccessPage() {
                   >
                     Metadata URI: <span className="mono">{gateContext.metadataUri}</span>
                   </Typography>
+                )}
+                {(gateContext.reputationDaoId || gateContext.verificationDaoId) && (
+                  <Stack spacing={0.35} sx={{ mt: 0.6 }}>
+                    {gateContext.reputationDaoId && (
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={0.9} alignItems={{ sm: "center" }}>
+                        <Typography sx={{ fontSize: "0.8rem", color: "rgba(220, 232, 251, 0.86)" }}>
+                          OG DAO ID: <span className="mono">{gateContext.reputationDaoId}</span>
+                        </Typography>
+                        <Stack direction="row" spacing={0.4}>
+                          <Button
+                            size="small"
+                            variant="text"
+                            sx={{ minWidth: 0, px: 0.8 }}
+                            onClick={() => void copyText(gateContext.reputationDaoId ?? "")}
+                          >
+                            Copy
+                          </Button>
+                          {vineDaoLink && (
+                            <Button
+                              size="small"
+                              variant="text"
+                              href={vineDaoLink}
+                              target="_blank"
+                              rel="noreferrer"
+                              sx={{ minWidth: 0, px: 0.8 }}
+                            >
+                              Open
+                            </Button>
+                          )}
+                        </Stack>
+                      </Stack>
+                    )}
+                    {gateContext.verificationDaoId && (
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={0.9} alignItems={{ sm: "center" }}>
+                        <Typography sx={{ fontSize: "0.8rem", color: "rgba(220, 232, 251, 0.86)" }}>
+                          Verification DAO ID: <span className="mono">{gateContext.verificationDaoId}</span>
+                        </Typography>
+                        <Stack direction="row" spacing={0.4}>
+                          <Button
+                            size="small"
+                            variant="text"
+                            sx={{ minWidth: 0, px: 0.8 }}
+                            onClick={() => void copyText(gateContext.verificationDaoId ?? "")}
+                          >
+                            Copy
+                          </Button>
+                          {verificationDaoLink && (
+                            <Button
+                              size="small"
+                              variant="text"
+                              href={verificationDaoLink}
+                              target="_blank"
+                              rel="noreferrer"
+                              sx={{ minWidth: 0, px: 0.8 }}
+                            >
+                              Open
+                            </Button>
+                          )}
+                        </Stack>
+                      </Stack>
+                    )}
+                  </Stack>
                 )}
               </Box>
             </Box>

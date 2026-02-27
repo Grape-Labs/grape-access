@@ -112,6 +112,8 @@ declare global {
 interface CreateFormState {
   gateId: string;
   daoId: string;
+  reputationDaoId: string;
+  verificationDaoId: string;
   authority: string;
   metadataUri: string;
   metadataName: string;
@@ -369,6 +371,8 @@ const PLATFORM_TAGS: Record<number, string> = {
 const defaultCreateForm: CreateFormState = {
   gateId: "",
   daoId: "",
+  reputationDaoId: "",
+  verificationDaoId: "",
   authority: "",
   metadataUri: "",
   metadataName: "",
@@ -2188,41 +2192,58 @@ export default function Page() {
     }
     return `${Math.round((passed / total) * 100)}%`;
   }, [selectedAdminGate]);
-  const createDaoIdKey = useMemo(() => {
+  const sharedDaoIdKey = useMemo(() => {
     try {
-      return parsePublicKey("DAO ID", createForm.daoId, false);
+      return parsePublicKey("Shared DAO ID", createForm.daoId, false);
     } catch {
       return undefined;
     }
   }, [createForm.daoId]);
+  const reputationDaoIdKey = useMemo(() => {
+    try {
+      return (
+        parsePublicKey("OG Reputation DAO ID", createForm.reputationDaoId, false) ?? sharedDaoIdKey
+      );
+    } catch {
+      return undefined;
+    }
+  }, [createForm.reputationDaoId, sharedDaoIdKey]);
+  const verificationDaoIdKey = useMemo(() => {
+    try {
+      return (
+        parsePublicKey("Verification DAO ID", createForm.verificationDaoId, false) ??
+        sharedDaoIdKey
+      );
+    } catch {
+      return undefined;
+    }
+  }, [createForm.verificationDaoId, sharedDaoIdKey]);
   const derivedVineConfigFromDao = useMemo(() => {
-    if (!createDaoIdKey) {
+    if (!reputationDaoIdKey) {
       return "";
     }
-    const [configPda] = VineReputationClient.getConfigPda(createDaoIdKey);
+    const [configPda] = VineReputationClient.getConfigPda(reputationDaoIdKey);
     return configPda.toBase58();
-  }, [createDaoIdKey]);
+  }, [reputationDaoIdKey]);
   const derivedGrapeSpaceFromDao = useMemo(() => {
-    if (!createDaoIdKey) {
+    if (!verificationDaoIdKey) {
       return "";
     }
-    const [spacePda] = GrapeVerificationRegistry.deriveSpacePda(createDaoIdKey);
+    const [spacePda] = GrapeVerificationRegistry.deriveSpacePda(verificationDaoIdKey);
     return spacePda.toBase58();
-  }, [createDaoIdKey]);
+  }, [verificationDaoIdKey]);
   const vineDaoLink = useMemo(() => {
-    if (!createDaoIdKey) {
+    if (!reputationDaoIdKey) {
       return "";
     }
-    return `https://vine.governance.so/dao/${createDaoIdKey.toBase58()}`;
-  }, [createDaoIdKey]);
+    return `https://vine.governance.so/dao/${reputationDaoIdKey.toBase58()}`;
+  }, [reputationDaoIdKey]);
   const verificationDaoLink = useMemo(() => {
-    if (!createDaoIdKey) {
+    if (!verificationDaoIdKey) {
       return "";
     }
-    const url = new URL("https://verification.governance.so/");
-    url.searchParams.set("dao_id", createDaoIdKey.toBase58());
-    return url.toString();
-  }, [createDaoIdKey]);
+    return `https://verification.governance.so/dao/${verificationDaoIdKey.toBase58()}`;
+  }, [verificationDaoIdKey]);
   const isAdvancedCheckMode = checkAccessMode === "advanced";
   const isAdvancedBuilderMode = builderMode === "advanced";
   const isEditMode = editorMode === "edit";
@@ -2247,6 +2268,8 @@ export default function Page() {
     () => ({
       gateId: createForm.gateId,
       daoId: createForm.daoId || undefined,
+      reputationDaoId: createForm.reputationDaoId || createForm.daoId || undefined,
+      verificationDaoId: createForm.verificationDaoId || createForm.daoId || undefined,
       authority: createForm.authority || "wallet.publicKey",
       metadataUri: createForm.metadataUri || undefined,
       criteria: {
@@ -3305,8 +3328,8 @@ export default function Page() {
   };
 
   const handleApplyDaoDerivations = () => {
-    if (!createDaoIdKey) {
-      notify("Enter a valid DAO ID first.", "error");
+    if (!reputationDaoIdKey && !verificationDaoIdKey) {
+      notify("Enter an OG Reputation DAO ID and/or Verification DAO ID first.", "error");
       return;
     }
     const needsReputation =
@@ -3333,9 +3356,16 @@ export default function Page() {
       }
     }
     setCreateForm((prev) => ({ ...prev, ...updates }));
+    if (derivedCount === 0 && ((needsReputation && !derivedVineConfigFromDao) || (needsVerification && !derivedGrapeSpaceFromDao))) {
+      notify(
+        "Missing DAO ID for one or more enabled rule types. Add OG Reputation DAO ID and/or Verification DAO ID.",
+        "error"
+      );
+      return;
+    }
     notify(
       derivedCount > 0
-        ? `Applied ${derivedCount} derived account${derivedCount > 1 ? "s" : ""} from DAO ID.`
+        ? `Applied ${derivedCount} derived account${derivedCount > 1 ? "s" : ""} from DAO IDs.`
         : "DAO-derived account values are already applied.",
       "success"
     );
@@ -3536,22 +3566,34 @@ export default function Page() {
 
   const buildCriteria = () => {
     const platforms = createForm.selectedPlatforms;
-    const daoId = parsePublicKey("DAO ID", createForm.daoId, false);
-    const derivedVineConfig = daoId ? VineReputationClient.getConfigPda(daoId)[0] : undefined;
-    const derivedGrapeSpace = daoId ? GrapeVerificationRegistry.deriveSpacePda(daoId)[0] : undefined;
+    const sharedDaoId = parsePublicKey("Shared DAO ID", createForm.daoId, false);
+    const reputationDaoId =
+      parsePublicKey("OG Reputation DAO ID", createForm.reputationDaoId, false) ?? sharedDaoId;
+    const verificationDaoId =
+      parsePublicKey("Verification DAO ID", createForm.verificationDaoId, false) ?? sharedDaoId;
+    const derivedVineConfig = reputationDaoId
+      ? VineReputationClient.getConfigPda(reputationDaoId)[0]
+      : undefined;
+    const derivedGrapeSpace = verificationDaoId
+      ? GrapeVerificationRegistry.deriveSpacePda(verificationDaoId)[0]
+      : undefined;
     const resolvedVineConfig =
       parsePublicKey("OG reputation config", createForm.vineConfig, false) ?? derivedVineConfig;
     const resolvedGrapeSpace =
       parsePublicKey("Grape space", createForm.grapeSpace, false) ?? derivedGrapeSpace;
     const requireVineConfig = () => {
       if (!resolvedVineConfig) {
-        throw new Error("OG reputation config is required. Provide DAO ID or config PDA.");
+        throw new Error(
+          "OG reputation config is required. Provide OG Reputation DAO ID (or Shared DAO ID) or config PDA."
+        );
       }
       return resolvedVineConfig;
     };
     const requireGrapeSpace = () => {
       if (!resolvedGrapeSpace) {
-        throw new Error("Grape space is required. Provide DAO ID or space PDA.");
+        throw new Error(
+          "Grape space is required. Provide Verification DAO ID (or Shared DAO ID) or space PDA."
+        );
       }
       return resolvedGrapeSpace;
     };
@@ -5970,10 +6012,28 @@ export default function Page() {
                           <Stack spacing={1}>
                             <TextField
                               fullWidth
-                              label="Community DAO ID (recommended)"
+                              label="OG Reputation DAO ID"
+                              value={createForm.reputationDaoId}
+                              onChange={(event) =>
+                                updateCreateForm("reputationDaoId", event.target.value)
+                              }
+                              helperText="Used to derive OG Reputation Config PDA."
+                            />
+                            <TextField
+                              fullWidth
+                              label="Verification DAO ID"
+                              value={createForm.verificationDaoId}
+                              onChange={(event) =>
+                                updateCreateForm("verificationDaoId", event.target.value)
+                              }
+                              helperText="Used to derive Grape Verification Space PDA."
+                            />
+                            <TextField
+                              fullWidth
+                              label="Shared DAO ID (optional fallback)"
                               value={createForm.daoId}
                               onChange={(event) => updateCreateForm("daoId", event.target.value)}
-                              helperText="Use DAO ID to auto-derive OG Reputation Config and Grape Space PDAs."
+                              helperText="Optional fallback if both systems use the same DAO ID."
                             />
                             {(derivedVineConfigFromDao || derivedGrapeSpaceFromDao) && (
                               <Stack spacing={0.4}>
@@ -5993,7 +6053,7 @@ export default function Page() {
                               <Button
                                 variant="outlined"
                                 onClick={handleApplyDaoDerivations}
-                                disabled={!createDaoIdKey}
+                                disabled={!reputationDaoIdKey && !verificationDaoIdKey}
                               >
                                 Apply Derived PDAs
                               </Button>
