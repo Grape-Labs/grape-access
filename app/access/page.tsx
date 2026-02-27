@@ -131,6 +131,7 @@ interface GateContextState {
   status: "idle" | "loading" | "ready" | "error";
   message: string;
   gateId?: string;
+  daoId?: string;
   metadataUri?: string;
   criteriaVariant?: { type: string; config: Record<string, unknown> };
   gateTypeLabel?: string;
@@ -2089,6 +2090,20 @@ export default function AccessPage() {
     () => renderEligibilitySummary(gateContext.criteriaVariant),
     [gateContext.criteriaVariant]
   );
+  const vineDaoLink = useMemo(() => {
+    if (!gateContext.daoId) {
+      return "";
+    }
+    return `https://vine.governance.so/dao/${gateContext.daoId}`;
+  }, [gateContext.daoId]);
+  const verificationDaoLink = useMemo(() => {
+    if (!gateContext.daoId) {
+      return "";
+    }
+    const url = new URL("https://verification.governance.so/");
+    url.searchParams.set("dao_id", gateContext.daoId);
+    return url.toString();
+  }, [gateContext.daoId]);
 
   const progressStep = useMemo(() => {
     if (!isWalletConnected) {
@@ -2312,6 +2327,28 @@ export default function AccessPage() {
       const gateRecord = gate as Record<string, unknown>;
       const metadataUri =
         typeof gateRecord.metadataUri === "string" ? gateRecord.metadataUri.trim() : "";
+      let derivedDaoId: string | undefined;
+      const grapeSpaceInput = asPublicKeyValue(criteriaVariant.config.grapeSpace);
+      if (grapeSpaceInput) {
+        try {
+          const resolvedVerificationSpace = await resolveVerificationSpaceContext(
+            connection,
+            grapeSpaceInput
+          );
+          if (resolvedVerificationSpace) {
+            const contexts = extractVerificationLinkContexts({
+              grapeSpaceInput,
+              resolvedSpace: resolvedVerificationSpace.space,
+              spaceData: resolvedVerificationSpace.spaceData
+            });
+            if (contexts.length > 0) {
+              derivedDaoId = contexts[0].daoId.toBase58();
+            }
+          }
+        } catch {
+          // Ignore DAO derivation failures; gate load should still succeed.
+        }
+      }
       let profileOverrides: Partial<CommunityProfile> = {};
       if (metadataUri) {
         try {
@@ -2325,6 +2362,7 @@ export default function AccessPage() {
       setGateContext({
         status: "ready",
         gateId: gateId.toBase58(),
+        daoId: derivedDaoId,
         metadataUri: metadataUri || undefined,
         message: `Gate loaded (RPC slot ${probeSlot}). Required accounts are auto-derived for access checks.`,
         criteriaVariant,
@@ -3922,7 +3960,7 @@ export default function AccessPage() {
             onChange={(event) => setMemberGateId(event.target.value)}
             helperText={`Gate ID identifier (not the gate PDA account address). Network: ${networkLabel}.`}
           />
-          {derivedGatePda && (
+          {isAdvancedMode && derivedGatePda && (
             <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mt: -0.6 }}>
               <Typography sx={{ color: "text.secondary", fontSize: "0.84rem" }}>
                 Derived Gate PDA: <span className="mono">{derivedGatePda}</span>
@@ -3953,6 +3991,16 @@ export default function AccessPage() {
             >
               Manage Gate (Admin)
             </Button>
+            {vineDaoLink && (
+              <Button href={vineDaoLink} target="_blank" rel="noreferrer" variant="text">
+                Open OG Reputation Space
+              </Button>
+            )}
+            {verificationDaoLink && (
+              <Button href={verificationDaoLink} target="_blank" rel="noreferrer" variant="text">
+                Open Grape Verification
+              </Button>
+            )}
             {lastRpcProbeSlot !== null && (
               <Typography sx={{ alignSelf: "center", color: "text.secondary", fontSize: "0.84rem" }}>
                 Last RPC Slot Probe: {lastRpcProbeSlot}

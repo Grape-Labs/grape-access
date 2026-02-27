@@ -78,6 +78,7 @@ type CriteriaKind =
 type GateTypeKind = "singleUse" | "reusable" | "timeLimited" | "subscription";
 type ClusterKind = "devnet" | "testnet" | "mainnet-beta" | "custom";
 type AccessCheckMode = "simple" | "advanced";
+type AccessBuilderMode = "simple" | "advanced";
 type GateEditorMode = "create" | "edit";
 const SHYFT_MAINNET_RPC =
   process.env.NEXT_PUBLIC_SHYFT_MAINNET_RPC?.trim() ||
@@ -110,6 +111,7 @@ declare global {
 
 interface CreateFormState {
   gateId: string;
+  daoId: string;
   authority: string;
   metadataUri: string;
   metadataName: string;
@@ -366,6 +368,7 @@ const PLATFORM_TAGS: Record<number, string> = {
 
 const defaultCreateForm: CreateFormState = {
   gateId: "",
+  daoId: "",
   authority: "",
   metadataUri: "",
   metadataName: "",
@@ -1923,6 +1926,7 @@ export default function Page() {
   const [cluster, setCluster] = useState<ClusterKind>(DEFAULT_CLUSTER);
   const [customRpc, setCustomRpc] = useState("");
   const [checkAccessMode, setCheckAccessMode] = useState<AccessCheckMode>("simple");
+  const [builderMode, setBuilderMode] = useState<AccessBuilderMode>("simple");
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const [createForm, setCreateForm] = useState<CreateFormState>({
@@ -1987,6 +1991,10 @@ export default function Page() {
     if (persistedCheckAccessMode === "simple" || persistedCheckAccessMode === "advanced") {
       setCheckAccessMode(persistedCheckAccessMode);
     }
+    const persistedBuilderMode = window.localStorage.getItem("grape_access_builder_mode");
+    if (persistedBuilderMode === "simple" || persistedBuilderMode === "advanced") {
+      setBuilderMode(persistedBuilderMode);
+    }
 
     const persistedCluster = window.localStorage.getItem("grape_access_cluster");
     const persistedCustomRpc = window.localStorage.getItem("grape_access_custom_rpc") ?? "";
@@ -2009,6 +2017,13 @@ export default function Page() {
     }
     window.localStorage.setItem("grape_access_check_mode", checkAccessMode);
   }, [checkAccessMode]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem("grape_access_builder_mode", builderMode);
+  }, [builderMode]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -2173,7 +2188,43 @@ export default function Page() {
     }
     return `${Math.round((passed / total) * 100)}%`;
   }, [selectedAdminGate]);
+  const createDaoIdKey = useMemo(() => {
+    try {
+      return parsePublicKey("DAO ID", createForm.daoId, false);
+    } catch {
+      return undefined;
+    }
+  }, [createForm.daoId]);
+  const derivedVineConfigFromDao = useMemo(() => {
+    if (!createDaoIdKey) {
+      return "";
+    }
+    const [configPda] = VineReputationClient.getConfigPda(createDaoIdKey);
+    return configPda.toBase58();
+  }, [createDaoIdKey]);
+  const derivedGrapeSpaceFromDao = useMemo(() => {
+    if (!createDaoIdKey) {
+      return "";
+    }
+    const [spacePda] = GrapeVerificationRegistry.deriveSpacePda(createDaoIdKey);
+    return spacePda.toBase58();
+  }, [createDaoIdKey]);
+  const vineDaoLink = useMemo(() => {
+    if (!createDaoIdKey) {
+      return "";
+    }
+    return `https://vine.governance.so/dao/${createDaoIdKey.toBase58()}`;
+  }, [createDaoIdKey]);
+  const verificationDaoLink = useMemo(() => {
+    if (!createDaoIdKey) {
+      return "";
+    }
+    const url = new URL("https://verification.governance.so/");
+    url.searchParams.set("dao_id", createDaoIdKey.toBase58());
+    return url.toString();
+  }, [createDaoIdKey]);
   const isAdvancedCheckMode = checkAccessMode === "advanced";
+  const isAdvancedBuilderMode = builderMode === "advanced";
   const isEditMode = editorMode === "edit";
   const editorGateId = editorTargetGateId || adminForm.selectedGateId.trim();
 
@@ -2195,14 +2246,15 @@ export default function Page() {
   const createPreview = useMemo(
     () => ({
       gateId: createForm.gateId,
+      daoId: createForm.daoId || undefined,
       authority: createForm.authority || "wallet.publicKey",
       metadataUri: createForm.metadataUri || undefined,
       criteria: {
         type: createForm.criteriaKind,
-        vineConfig: createForm.vineConfig,
+        vineConfig: createForm.vineConfig || derivedVineConfigFromDao || undefined,
         minPoints: createForm.minPoints,
         season: createForm.season,
-        grapeSpace: createForm.grapeSpace,
+        grapeSpace: createForm.grapeSpace || derivedGrapeSpaceFromDao || undefined,
         platforms: createForm.selectedPlatforms,
         requireWalletLink: createForm.requireWalletLink,
         minHoldDurationSeconds: createForm.minHoldDurationSeconds,
@@ -2236,7 +2288,7 @@ export default function Page() {
           ? buildAccessMetadataManifest(createForm)
           : undefined
     }),
-    [createForm]
+    [createForm, derivedVineConfigFromDao, derivedGrapeSpaceFromDao]
   );
 
   const createMetadataManifestPreview = useMemo(
@@ -3252,6 +3304,43 @@ export default function Page() {
     }));
   };
 
+  const handleApplyDaoDerivations = () => {
+    if (!createDaoIdKey) {
+      notify("Enter a valid DAO ID first.", "error");
+      return;
+    }
+    const needsReputation =
+      createForm.criteriaKind === "minReputation" ||
+      createForm.criteriaKind === "combined" ||
+      createForm.criteriaKind === "timeLockedReputation";
+    const needsVerification =
+      createForm.criteriaKind === "verifiedIdentity" ||
+      createForm.criteriaKind === "verifiedWithWallet" ||
+      createForm.criteriaKind === "combined";
+
+    const updates: Partial<CreateFormState> = {};
+    let derivedCount = 0;
+    if (needsReputation && derivedVineConfigFromDao) {
+      updates.vineConfig = derivedVineConfigFromDao;
+      if (createForm.vineConfig !== derivedVineConfigFromDao) {
+        derivedCount += 1;
+      }
+    }
+    if (needsVerification && derivedGrapeSpaceFromDao) {
+      updates.grapeSpace = derivedGrapeSpaceFromDao;
+      if (createForm.grapeSpace !== derivedGrapeSpaceFromDao) {
+        derivedCount += 1;
+      }
+    }
+    setCreateForm((prev) => ({ ...prev, ...updates }));
+    notify(
+      derivedCount > 0
+        ? `Applied ${derivedCount} derived account${derivedCount > 1 ? "s" : ""} from DAO ID.`
+        : "DAO-derived account values are already applied.",
+      "success"
+    );
+  };
+
   const generateGateId = () => {
     const generatedGateId = Keypair.generate().publicKey.toBase58();
     updateCreateForm("gateId", generatedGateId);
@@ -3447,36 +3536,55 @@ export default function Page() {
 
   const buildCriteria = () => {
     const platforms = createForm.selectedPlatforms;
+    const daoId = parsePublicKey("DAO ID", createForm.daoId, false);
+    const derivedVineConfig = daoId ? VineReputationClient.getConfigPda(daoId)[0] : undefined;
+    const derivedGrapeSpace = daoId ? GrapeVerificationRegistry.deriveSpacePda(daoId)[0] : undefined;
+    const resolvedVineConfig =
+      parsePublicKey("OG reputation config", createForm.vineConfig, false) ?? derivedVineConfig;
+    const resolvedGrapeSpace =
+      parsePublicKey("Grape space", createForm.grapeSpace, false) ?? derivedGrapeSpace;
+    const requireVineConfig = () => {
+      if (!resolvedVineConfig) {
+        throw new Error("OG reputation config is required. Provide DAO ID or config PDA.");
+      }
+      return resolvedVineConfig;
+    };
+    const requireGrapeSpace = () => {
+      if (!resolvedGrapeSpace) {
+        throw new Error("Grape space is required. Provide DAO ID or space PDA.");
+      }
+      return resolvedGrapeSpace;
+    };
 
     switch (createForm.criteriaKind) {
       case "minReputation":
         return CriteriaFactory.minReputation({
-          vineConfig: parsePublicKey("OG reputation config", createForm.vineConfig, true)!,
+          vineConfig: requireVineConfig(),
           minPoints: parseInteger("Minimum points", createForm.minPoints, 0),
           season: parseInteger("Season", createForm.season, 0)
         } as any);
       case "verifiedIdentity":
         return CriteriaFactory.verifiedIdentity({
-          grapeSpace: parsePublicKey("Grape space", createForm.grapeSpace, true)!,
+          grapeSpace: requireGrapeSpace(),
           platforms
         } as any);
       case "verifiedWithWallet":
         return CriteriaFactory.verifiedWithWallet({
-          grapeSpace: parsePublicKey("Grape space", createForm.grapeSpace, true)!,
+          grapeSpace: requireGrapeSpace(),
           platforms
         } as any);
       case "combined":
         return CriteriaFactory.combined({
-          vineConfig: parsePublicKey("OG reputation config", createForm.vineConfig, true)!,
+          vineConfig: requireVineConfig(),
           minPoints: parseInteger("Minimum points", createForm.minPoints, 0),
           season: parseInteger("Season", createForm.season, 0),
-          grapeSpace: parsePublicKey("Grape space", createForm.grapeSpace, true)!,
+          grapeSpace: requireGrapeSpace(),
           platforms,
           requireWalletLink: createForm.requireWalletLink
         } as any);
       case "timeLockedReputation":
         return CriteriaFactory.timeLockedReputation({
-          vineConfig: parsePublicKey("OG reputation config", createForm.vineConfig, true)!,
+          vineConfig: requireVineConfig(),
           minPoints: parseInteger("Minimum points", createForm.minPoints, 0),
           season: parseInteger("Season", createForm.season, 0),
           minHoldDurationSeconds: parseInteger(
@@ -5387,6 +5495,24 @@ export default function Page() {
 
                 {createStep === 1 && (
                   <Stack spacing={2}>
+                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2} alignItems={{ sm: "center" }}>
+                      <FormControl sx={{ minWidth: 220 }}>
+                        <InputLabel>Builder Mode</InputLabel>
+                        <Select
+                          label="Builder Mode"
+                          value={builderMode}
+                          onChange={(event) => setBuilderMode(event.target.value as AccessBuilderMode)}
+                        >
+                          <MenuItem value="simple">Simple</MenuItem>
+                          <MenuItem value="advanced">Advanced</MenuItem>
+                        </Select>
+                      </FormControl>
+                      {!isAdvancedBuilderMode && (
+                        <Typography variant="body2" color="text.secondary">
+                          Simple mode hides raw PDA fields and uses DAO ID derivation.
+                        </Typography>
+                      )}
+                    </Stack>
                     <Grid container spacing={2}>
                       <Grid size={{ xs: 12, sm: 6 }}>
                         <TextField
@@ -5831,22 +5957,88 @@ export default function Page() {
                     </Paper>
 
                     <Grid container spacing={2}>
+                      <Grid size={{ xs: 12 }}>
+                        <Paper
+                          variant="outlined"
+                          sx={{
+                            p: 1.2,
+                            borderRadius: 1.2,
+                            borderColor: "rgba(109, 184, 255, 0.24)",
+                            backgroundColor: "rgba(10, 16, 30, 0.45)"
+                          }}
+                        >
+                          <Stack spacing={1}>
+                            <TextField
+                              fullWidth
+                              label="Community DAO ID (recommended)"
+                              value={createForm.daoId}
+                              onChange={(event) => updateCreateForm("daoId", event.target.value)}
+                              helperText="Use DAO ID to auto-derive OG Reputation Config and Grape Space PDAs."
+                            />
+                            {(derivedVineConfigFromDao || derivedGrapeSpaceFromDao) && (
+                              <Stack spacing={0.4}>
+                                {derivedVineConfigFromDao && (
+                                  <Typography variant="caption" color="text.secondary" className="mono">
+                                    Derived OG Config: {derivedVineConfigFromDao}
+                                  </Typography>
+                                )}
+                                {derivedGrapeSpaceFromDao && (
+                                  <Typography variant="caption" color="text.secondary" className="mono">
+                                    Derived Grape Space: {derivedGrapeSpaceFromDao}
+                                  </Typography>
+                                )}
+                              </Stack>
+                            )}
+                            <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                              <Button
+                                variant="outlined"
+                                onClick={handleApplyDaoDerivations}
+                                disabled={!createDaoIdKey}
+                              >
+                                Apply Derived PDAs
+                              </Button>
+                              {vineDaoLink && (
+                                <Button
+                                  variant="text"
+                                  href={vineDaoLink}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  Open OG Reputation Space
+                                </Button>
+                              )}
+                              {verificationDaoLink && (
+                                <Button
+                                  variant="text"
+                                  href={verificationDaoLink}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  Open Grape Verification
+                                </Button>
+                              )}
+                            </Stack>
+                          </Stack>
+                        </Paper>
+                      </Grid>
                       {(createForm.criteriaKind === "minReputation" ||
                         createForm.criteriaKind === "combined" ||
                         createForm.criteriaKind === "timeLockedReputation") && (
                         <>
-                          <Grid size={{ xs: 12, sm: 6 }}>
-                            <TextField
-                              fullWidth
-                              label="OG Reputation Config"
-                              value={createForm.vineConfig}
-                              onChange={(event) =>
-                                updateCreateForm("vineConfig", event.target.value)
-                              }
-                              helperText="Public key of your community OG Reputation config account."
-                            />
-                          </Grid>
-                          <Grid size={{ xs: 12, sm: 3 }}>
+                          {isAdvancedBuilderMode && (
+                            <Grid size={{ xs: 12, sm: 6 }}>
+                              <TextField
+                                fullWidth
+                                label="OG Reputation Config"
+                                value={createForm.vineConfig}
+                                onChange={(event) =>
+                                  updateCreateForm("vineConfig", event.target.value)
+                                }
+                                helperText="Public key of your community OG Reputation config account."
+                              />
+                            </Grid>
+                          )}
+                          <Grid size={{ xs: 12, sm: isAdvancedBuilderMode ? 3 : 6 }}>
                             <TextField
                               fullWidth
                               label="Min Points"
@@ -5855,7 +6047,7 @@ export default function Page() {
                               helperText="Minimum reputation points required."
                             />
                           </Grid>
-                          <Grid size={{ xs: 12, sm: 3 }}>
+                          <Grid size={{ xs: 12, sm: isAdvancedBuilderMode ? 3 : 6 }}>
                             <TextField
                               fullWidth
                               label="Season"
@@ -5869,7 +6061,8 @@ export default function Page() {
 
                       {(createForm.criteriaKind === "verifiedIdentity" ||
                         createForm.criteriaKind === "verifiedWithWallet" ||
-                        createForm.criteriaKind === "combined") && (
+                        createForm.criteriaKind === "combined") &&
+                        isAdvancedBuilderMode && (
                         <Grid size={{ xs: 12 }}>
                           <TextField
                             fullWidth
