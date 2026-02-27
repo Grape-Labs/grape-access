@@ -855,14 +855,22 @@ async function sendInstructionWithWallet(args: {
 
   const signed = await wallet.signTransaction(transaction);
   const signature = await connection.sendRawTransaction(signed.serialize());
-  await connection.confirmTransaction(
-    {
-      signature,
-      blockhash: latestBlockhash.blockhash,
-      lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
-    },
-    "confirmed"
-  );
+  try {
+    await connection.confirmTransaction(
+      {
+        signature,
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
+      },
+      "confirmed"
+    );
+  } catch (error) {
+    // Preserve signature so callers can perform recovery checks if confirmation times out.
+    if (error && typeof error === "object") {
+      (error as Record<string, unknown>).signature = signature;
+    }
+    throw error;
+  }
   return signature;
 }
 
