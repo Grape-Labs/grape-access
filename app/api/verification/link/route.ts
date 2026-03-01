@@ -13,11 +13,12 @@ interface VerificationLinkRequest {
   discord_user_id?: string;
   walletPubkey?: string;
   wallet_pubkey?: string;
-  passed?: boolean;
-  signature?: string;
-  verificationMode?: "transaction" | "rpc";
-  verificationSlot?: number;
-  checkedAtLabel?: string;
+  identityPda?: string;
+  identity_pda?: string;
+  linkPda?: string;
+  link_pda?: string;
+  verifiedAt?: string;
+  verified_at?: string;
   proofItems?: Array<{
     label?: string;
     address?: string;
@@ -70,15 +71,16 @@ export async function POST(request: Request) {
     const guildId = String(body.guildId ?? body.guild_id ?? "").trim();
     const discordUserId = String(body.discordUserId ?? body.discord_user_id ?? "").trim();
     const walletPubkey = String(body.walletPubkey ?? body.wallet_pubkey ?? "").trim();
-    const passed = Boolean(body.passed);
-    const signature = typeof body.signature === "string" ? body.signature.trim() : "";
-    const verificationMode = body.verificationMode === "transaction" ? "transaction" : "rpc";
-    const verificationSlot =
-      typeof body.verificationSlot === "number" && Number.isFinite(body.verificationSlot)
-        ? body.verificationSlot
-        : undefined;
-    const checkedAtLabel =
-      typeof body.checkedAtLabel === "string" ? body.checkedAtLabel.slice(0, 120) : undefined;
+    const identityPda = String(body.identityPda ?? body.identity_pda ?? "").trim();
+    const linkPda = String(body.linkPda ?? body.link_pda ?? "").trim();
+    const verifiedAtRaw = String(body.verifiedAt ?? body.verified_at ?? "").trim();
+    let verifiedAt = new Date().toISOString();
+    if (verifiedAtRaw) {
+      const parsedVerifiedAt = new Date(verifiedAtRaw);
+      if (!Number.isNaN(parsedVerifiedAt.getTime())) {
+        verifiedAt = parsedVerifiedAt.toISOString();
+      }
+    }
 
     if (!gateId || !guildId || !discordUserId || !walletPubkey) {
       return NextResponse.json(
@@ -101,11 +103,17 @@ export async function POST(request: Request) {
     try {
       new PublicKey(gateId);
       new PublicKey(walletPubkey);
+      if (identityPda) {
+        new PublicKey(identityPda);
+      }
+      if (linkPda) {
+        new PublicKey(linkPda);
+      }
     } catch {
       return NextResponse.json(
         {
           ok: false,
-          error: "Invalid gateId or walletPubkey."
+          error: "Invalid gateId, walletPubkey, identityPda, or linkPda."
         },
         { status: 400 }
       );
@@ -124,29 +132,19 @@ export async function POST(request: Request) {
     }
 
     const callbackId = randomUUID();
-    const callbackPayload = {
-      callbackId,
-      source: "access_ui",
-      gateId,
-      guildId,
+    const callbackPayload: Record<string, unknown> = {
       discordUserId,
+      guildId,
       walletPubkey,
-      passed,
-      signature: signature || undefined,
-      verificationMode,
-      verificationSlot,
-      checkedAtLabel,
-      proofItems: Array.isArray(body.proofItems)
-        ? body.proofItems
-            .slice(0, 8)
-            .map((item) => ({
-              label: typeof item?.label === "string" ? item.label.slice(0, 64) : undefined,
-              address: typeof item?.address === "string" ? item.address.slice(0, 64) : undefined,
-              url: typeof item?.url === "string" ? item.url.slice(0, 320) : undefined
-            }))
-        : undefined,
-      syncedAt: new Date().toISOString()
+      gateId,
+      verifiedAt
     };
+    if (identityPda) {
+      callbackPayload.identityPda = identityPda;
+    }
+    if (linkPda) {
+      callbackPayload.linkPda = linkPda;
+    }
 
     const headers: Record<string, string> = {
       "content-type": "application/json",

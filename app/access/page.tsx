@@ -2184,13 +2184,11 @@ export default function AccessPage() {
     gateId: string;
     walletPubkey: string;
     passed: boolean;
-    signature?: string;
-    verificationMode?: "transaction" | "rpc";
-    verificationSlot?: number;
-    checkedAtLabel?: string;
-    proofItems?: VerificationProofItem[];
+    identityPda?: string;
+    linkPda?: string;
+    verifiedAt?: string;
   }) => {
-    if (!discordVerificationContext) {
+    if (!discordVerificationContext || !args.passed) {
       return;
     }
 
@@ -2206,16 +2204,13 @@ export default function AccessPage() {
           "content-type": "application/json"
         },
         body: JSON.stringify({
-          gateId: args.gateId,
-          guildId: discordVerificationContext.guildId,
           discordUserId: discordVerificationContext.discordUserId,
+          guildId: discordVerificationContext.guildId,
           walletPubkey: args.walletPubkey,
-          passed: args.passed,
-          signature: args.signature,
-          verificationMode: args.verificationMode,
-          verificationSlot: args.verificationSlot,
-          checkedAtLabel: args.checkedAtLabel,
-          proofItems: args.proofItems
+          gateId: args.gateId,
+          identityPda: args.identityPda,
+          linkPda: args.linkPda,
+          verifiedAt: args.verifiedAt
         })
       });
 
@@ -2232,10 +2227,8 @@ export default function AccessPage() {
       setDiscordSync({
         status: "success",
         message: payload.callbackId
-          ? `${args.passed ? "Discord pass sync complete." : "Discord fail sync complete."} Callback ID: ${payload.callbackId}`
-          : args.passed
-            ? "Discord pass sync complete."
-            : "Discord fail sync complete."
+          ? `Discord sync complete. Callback ID: ${payload.callbackId}`
+          : "Discord sync complete."
       });
     } catch (error) {
       const message =
@@ -3185,7 +3178,9 @@ export default function AccessPage() {
 
       const shouldStoreRecord = Boolean(effectiveForm.storeRecord);
       const [gatePda] = await findPrimaryAccessPda(params.gateId, GPASS_PROGRAM_ID);
-      const checkedAtLabel = new Date().toLocaleString();
+      const checkedAtDate = new Date();
+      const checkedAtLabel = checkedAtDate.toLocaleString();
+      const checkedAtIso = checkedAtDate.toISOString();
       const gateExplorerUrl = explorerAddressLink(gatePda.toBase58(), rpcEndpoint);
       const userExplorerUrl = explorerAddressLink(params.user.toBase58(), rpcEndpoint);
       let identityVerifiedAtLabel: string | undefined;
@@ -3356,11 +3351,9 @@ export default function AccessPage() {
         gateId: params.gateId.toBase58(),
         walletPubkey: params.user.toBase58(),
         passed,
-        signature,
-        verificationMode: shouldStoreRecord ? "transaction" : "rpc",
-        verificationSlot,
-        checkedAtLabel,
-        proofItems
+        identityPda: params.identityAccount?.toBase58(),
+        linkPda: params.linkAccount?.toBase58(),
+        verifiedAt: checkedAtIso
       });
 
       notify(
@@ -3396,14 +3389,18 @@ export default function AccessPage() {
           }
 
           if (recoveredStatus) {
-            let checkedAtLabel = new Date().toLocaleString();
+            const recoveredAtDate = new Date();
+            let checkedAtLabel = recoveredAtDate.toLocaleString();
+            let checkedAtIso = recoveredAtDate.toISOString();
             try {
               const txInfo = await connection.getParsedTransaction(recoveredSignature, {
                 commitment: "confirmed",
                 maxSupportedTransactionVersion: 0
               });
               if (txInfo?.blockTime) {
-                checkedAtLabel = new Date(txInfo.blockTime * 1000).toLocaleString();
+                const recoveredBlockDate = new Date(txInfo.blockTime * 1000);
+                checkedAtLabel = recoveredBlockDate.toLocaleString();
+                checkedAtIso = recoveredBlockDate.toISOString();
               }
             } catch {
               // Keep fallback local timestamp label.
@@ -3433,11 +3430,9 @@ export default function AccessPage() {
               gateId: latestCheckParams?.gateId.toBase58() ?? memberForm.gateId.trim(),
               walletPubkey: wallet.publicKey.toBase58(),
               passed: true,
-              signature: recoveredSignature,
-              verificationMode: "transaction",
-              verificationSlot: recoveredStatus.slot,
-              checkedAtLabel,
-              proofItems: proofItemsForRecovery
+              identityPda: latestCheckParams?.identityAccount?.toBase58(),
+              linkPda: latestCheckParams?.linkAccount?.toBase58(),
+              verifiedAt: checkedAtIso
             });
             notify("Transaction confirmed on-chain.", "success");
             return;
