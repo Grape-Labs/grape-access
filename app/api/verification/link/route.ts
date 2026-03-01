@@ -29,11 +29,29 @@ function isSnowflake(value: string) {
   return /^\d{15,22}$/.test(value);
 }
 
+function normalizeCallbackUrl(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const normalizedPath = parsed.pathname.replace(/\/+$/, "");
+    if (!normalizedPath || normalizedPath === "") {
+      parsed.pathname = "/api/verification/link";
+    }
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
+
 function resolveCallbackConfig() {
-  const callbackUrl =
+  const callbackUrlRaw =
     process.env.DISCORD_VERIFICATION_CALLBACK_URL?.trim() ||
     process.env.DISCORD_BOT_CALLBACK_URL?.trim() ||
     "";
+  const callbackUrl = normalizeCallbackUrl(callbackUrlRaw);
   const callbackSecret =
     process.env.DISCORD_VERIFICATION_CALLBACK_SECRET?.trim() ||
     process.env.DISCORD_BOT_CALLBACK_SECRET?.trim() ||
