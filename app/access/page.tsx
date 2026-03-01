@@ -89,6 +89,16 @@ interface MemberCheckState {
   response?: unknown;
 }
 
+interface DiscordVerificationContext {
+  guildId: string;
+  discordUserId: string;
+}
+
+interface DiscordSyncState {
+  status: "idle" | "pending" | "success" | "error";
+  message: string;
+}
+
 interface VerificationProofItem {
   label: string;
   address: string;
@@ -266,6 +276,11 @@ const defaultMemberForm: MemberFormState = {
   linkAccount: "",
   tokenAccount: "",
   storeRecord: true
+};
+
+const defaultDiscordSyncState: DiscordSyncState = {
+  status: "idle",
+  message: ""
 };
 
 function parsePublicKey(label: string, raw: string, required: boolean) {
@@ -1945,6 +1960,9 @@ export default function AccessPage() {
     status: "idle",
     message: "Connect your wallet and run a gate check."
   });
+  const [discordVerificationContext, setDiscordVerificationContext] =
+    useState<DiscordVerificationContext | null>(null);
+  const [discordSync, setDiscordSync] = useState<DiscordSyncState>(defaultDiscordSyncState);
   const [memberDerive, setMemberDerive] = useState<MemberDeriveState>({
     status: "idle",
     message: "Use auto-derive to populate required accounts for your gate."
@@ -2030,7 +2048,25 @@ export default function AccessPage() {
     if (rpcFromQuery) {
       setCustomRpc(rpcFromQuery);
     }
+
+    const guildIdFromQuery =
+      params.get("guildId")?.trim() ?? params.get("guild_id")?.trim() ?? "";
+    const discordUserIdFromQuery =
+      params.get("discordUserId")?.trim() ?? params.get("discord_user_id")?.trim() ?? "";
+    const isSnowflake = (value: string) => /^\d{15,22}$/.test(value);
+    if (isSnowflake(guildIdFromQuery) && isSnowflake(discordUserIdFromQuery)) {
+      setDiscordVerificationContext({
+        guildId: guildIdFromQuery,
+        discordUserId: discordUserIdFromQuery
+      });
+    } else {
+      setDiscordVerificationContext(null);
+    }
   }, []);
+
+  useEffect(() => {
+    setDiscordSync(defaultDiscordSyncState);
+  }, [memberForm.gateId, discordVerificationContext?.guildId, discordVerificationContext?.discordUserId]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -2142,6 +2178,74 @@ export default function AccessPage() {
     setSnackbarMessage(message);
     setSnackbarSeverity(severity);
     setSnackbarOpen(true);
+  };
+
+  const syncDiscordVerificationCallback = async (args: {
+    gateId: string;
+    walletPubkey: string;
+    passed: boolean;
+    signature?: string;
+    verificationMode?: "transaction" | "rpc";
+    verificationSlot?: number;
+    checkedAtLabel?: string;
+    proofItems?: VerificationProofItem[];
+  }) => {
+    if (!discordVerificationContext) {
+      return;
+    }
+
+    setDiscordSync({
+      status: "pending",
+      message: "Syncing verification result to Discord bot..."
+    });
+
+    try {
+      const response = await fetch("/api/verification/link", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          gateId: args.gateId,
+          guildId: discordVerificationContext.guildId,
+          discordUserId: discordVerificationContext.discordUserId,
+          walletPubkey: args.walletPubkey,
+          passed: args.passed,
+          signature: args.signature,
+          verificationMode: args.verificationMode,
+          verificationSlot: args.verificationSlot,
+          checkedAtLabel: args.checkedAtLabel,
+          proofItems: args.proofItems
+        })
+      });
+
+      const payload = (await response.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        callbackId?: string;
+      };
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `Callback failed (${response.status}).`);
+      }
+
+      setDiscordSync({
+        status: "success",
+        message: payload.callbackId
+          ? `${args.passed ? "Discord pass sync complete." : "Discord fail sync complete."} Callback ID: ${payload.callbackId}`
+          : args.passed
+            ? "Discord pass sync complete."
+            : "Discord fail sync complete."
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Discord sync failed. Please retry /check in Discord.";
+      setDiscordSync({
+        status: "error",
+        message: `Access passed, but Discord sync failed: ${message}`
+      });
+      notify("Access passed, but Discord sync failed.", "info");
+    }
   };
 
   const updateMemberForm = <K extends keyof MemberFormState>(key: K, value: MemberFormState[K]) => {
@@ -3033,6 +3137,7 @@ export default function AccessPage() {
     }
 
     setMemberBusy(true);
+    setDiscordSync(defaultDiscordSyncState);
     let latestCheckParams: CheckGateInputParams | null = null;
     let latestClient: Record<string, unknown> | null = null;
     let attemptedOnChainTx = false;
@@ -3247,6 +3352,17 @@ export default function AccessPage() {
         response: toDisplayValue(result)
       });
 
+      void syncDiscordVerificationCallback({
+        gateId: params.gateId.toBase58(),
+        walletPubkey: params.user.toBase58(),
+        passed,
+        signature,
+        verificationMode: shouldStoreRecord ? "transaction" : "rpc",
+        verificationSlot,
+        checkedAtLabel,
+        proofItems
+      });
+
       notify(
         signature ? `Member check submitted. Signature: ${signature}` : resultMessage,
         passed === false ? "info" : "success"
@@ -3312,6 +3428,16 @@ export default function AccessPage() {
                 signature: recoveredSignature,
                 slot: recoveredStatus.slot
               })
+            });
+            void syncDiscordVerificationCallback({
+              gateId: latestCheckParams?.gateId.toBase58() ?? memberForm.gateId.trim(),
+              walletPubkey: wallet.publicKey.toBase58(),
+              passed: true,
+              signature: recoveredSignature,
+              verificationMode: "transaction",
+              verificationSlot: recoveredStatus.slot,
+              checkedAtLabel,
+              proofItems: proofItemsForRecovery
             });
             notify("Transaction confirmed on-chain.", "success");
             return;
@@ -4564,6 +4690,26 @@ export default function AccessPage() {
                 </Typography>
                 {gateContext.profile.supportLabel && (
                   <Typography color="text.secondary">{gateContext.profile.supportLabel}</Typography>
+                )}
+                {discordVerificationContext && (
+                  <Alert
+                    severity={
+                      discordSync.status === "success"
+                        ? "success"
+                        : discordSync.status === "error"
+                          ? "warning"
+                          : "info"
+                    }
+                    sx={{ py: 0.4 }}
+                  >
+                    {discordSync.status === "pending"
+                      ? discordSync.message
+                      : discordSync.status === "success"
+                        ? discordSync.message
+                        : discordSync.status === "error"
+                          ? discordSync.message
+                          : "Discord callback is enabled for this verify link."}
+                  </Alert>
                 )}
                 {memberCheck.checkedAtLabel && (
                   <Typography variant="caption" color="text.secondary">
