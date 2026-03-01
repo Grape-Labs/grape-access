@@ -24,7 +24,7 @@ export const metadata: Metadata = {
   icons: {
     icon: "/images/favicon.ico",
     shortcut: "/images/favicon.ico",
-    apple: "/images/grape_access_logo_v2.png"
+    apple: "/images/grapelogo512.png"
   },
   openGraph: {
     title: "Grape Access Console",
@@ -34,7 +34,7 @@ export const metadata: Metadata = {
     siteName: "Grape Access Console",
     images: [
       {
-        url: "/images/grape_access_logo_v2.png",
+        url: "/images/grapelogo512.png",
         width: 512,
         height: 512,
         alt: "Grape Access"
@@ -48,7 +48,7 @@ export const metadata: Metadata = {
     title: "Grape Access Console",
     description:
       "Manage access gates, verify eligibility, and share gate links with your community on Solana.",
-    images: ["/images/grape_access_logo_v2.png"]
+    images: ["/images/grapelogo512.png"]
   }
 };
 
