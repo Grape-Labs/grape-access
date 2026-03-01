@@ -5417,7 +5417,7 @@ export default function Page() {
               }}
             >
               <Image
-                src="/images/grapelogo512.png"
+                src="/images/grape_access_logo_v2.png"
                 alt="Grape logo icon"
                 width={24}
                 height={24}
