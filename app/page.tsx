@@ -47,7 +47,7 @@ import { Buffer } from "buffer";
 import { AnchorProvider, BorshAccountsCoder } from "@coral-xyz/anchor";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useWallet } from "@solana/wallet-adapter-react";
-import { SiDiscord, SiTelegram, SiX } from "react-icons/si";
+import { SiDiscord, SiGithub, SiTelegram, SiX } from "react-icons/si";
 import type { IconType } from "react-icons";
 import {
   Connection,
@@ -5438,6 +5438,43 @@ export default function Page() {
               rowGap: 1
             }}
           >
+            <Stack direction="row" spacing={0.75} alignItems="center">
+              <Button
+                size="small"
+                href="https://grapedao.gitbook.io/products/grape-access"
+                target="_blank"
+                rel="noreferrer"
+                sx={{ minWidth: 0, px: 1.1, textTransform: "none", fontSize: "0.78rem" }}
+              >
+                Docs
+              </Button>
+              <Tooltip title="Discord">
+                <IconButton
+                  size="small"
+                  component="a"
+                  href="https://discord.gg/xrxrCmvB"
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-label="Open Discord"
+                  sx={{ border: "1px solid", borderColor: "divider" }}
+                >
+                  <SiDiscord size={15} />
+                </IconButton>
+              </Tooltip>
+              <Tooltip title="GitHub">
+                <IconButton
+                  size="small"
+                  component="a"
+                  href="https://github.com/Grape-Labs/grape-access"
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-label="Open GitHub repository"
+                  sx={{ border: "1px solid", borderColor: "divider" }}
+                >
+                  <SiGithub size={15} />
+                </IconButton>
+              </Tooltip>
+            </Stack>
             <Tooltip title="Network & RPC settings">
               <IconButton
                 size="small"

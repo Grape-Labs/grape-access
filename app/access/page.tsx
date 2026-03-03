@@ -46,7 +46,7 @@ import {
 } from "@solana/web3.js";
 import { Buffer } from "buffer";
 import bs58 from "bs58";
-import { SiDiscord, SiTelegram, SiX } from "react-icons/si";
+import { SiDiscord, SiGithub, SiTelegram, SiX } from "react-icons/si";
 import type { IconType } from "react-icons";
 import * as GPassSdk from "@grapenpm/grape-access-sdk";
 import * as GrapeVerificationRegistry from "@grapenpm/grape-verification-registry";
@@ -4147,6 +4147,53 @@ export default function AccessPage() {
                     </Button>
                   )}
                   <Stack direction="row" spacing={0.8} alignItems="center">
+                    <Button
+                      size="small"
+                      href="https://grapedao.gitbook.io/products/grape-access"
+                      target="_blank"
+                      rel="noreferrer"
+                      sx={{
+                        minWidth: 0,
+                        px: 1.1,
+                        textTransform: "none",
+                        fontSize: "0.78rem",
+                        color: "rgba(235, 243, 255, 0.9)"
+                      }}
+                    >
+                      Docs
+                    </Button>
+                    <IconButton
+                      component="a"
+                      href="https://discord.gg/xrxrCmvB"
+                      target="_blank"
+                      rel="noreferrer"
+                      aria-label="Open Discord"
+                      sx={{
+                        border: "1px solid",
+                        borderColor: "rgba(109, 184, 255, 0.34)",
+                        color: "rgba(228, 238, 255, 0.9)",
+                        width: 34,
+                        height: 34
+                      }}
+                    >
+                      <SiDiscord size={15} />
+                    </IconButton>
+                    <IconButton
+                      component="a"
+                      href="https://github.com/Grape-Labs/grape-access"
+                      target="_blank"
+                      rel="noreferrer"
+                      aria-label="Open GitHub repository"
+                      sx={{
+                        border: "1px solid",
+                        borderColor: "rgba(109, 184, 255, 0.34)",
+                        color: "rgba(228, 238, 255, 0.9)",
+                        width: 34,
+                        height: 34
+                      }}
+                    >
+                      <SiGithub size={15} />
+                    </IconButton>
                     <IconButton
                       onClick={() => setNetworkSettingsOpen(true)}
                       aria-label="Open network settings"
