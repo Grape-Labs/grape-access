@@ -8,6 +8,9 @@ import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import ShieldRoundedIcon from "@mui/icons-material/ShieldRounded";
 import {
   Alert,
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Box,
   Button,
   Card,
@@ -43,6 +46,7 @@ import {
   Typography
 } from "@mui/material";
 import Grid from "@mui/material/Grid2";
+import ExpandMoreRoundedIcon from "@mui/icons-material/ExpandMoreRounded";
 import { Buffer } from "buffer";
 import { AnchorProvider, BorshAccountsCoder } from "@coral-xyz/anchor";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
@@ -286,7 +290,7 @@ const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
   "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 );
 
-const createSteps = ["Choose Template", "Configure Gate", "Review & Execute"];
+const createSteps = ["Choose a policy", "Add details", "Review & create"];
 const primaryTabItems = [
   { label: "Create Gate", value: 0 },
   { label: "Check Access", value: 2 },
@@ -1934,6 +1938,7 @@ export default function Page() {
   const [customRpc, setCustomRpc] = useState("");
   const [checkAccessMode, setCheckAccessMode] = useState<AccessCheckMode>("simple");
   const [builderMode, setBuilderMode] = useState<AccessBuilderMode>("simple");
+  const [showOptionalSetup, setShowOptionalSetup] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const [createForm, setCreateForm] = useState<CreateFormState>({
@@ -3447,6 +3452,16 @@ export default function Page() {
     setEditorMode("create");
     setEditorTargetGateId("");
     notify("Generated a new Gate ID.", "success");
+  };
+
+  const startGateConfiguration = () => {
+    if (!isEditMode && !createForm.gateId.trim()) {
+      setCreateForm((prev) => ({
+        ...prev,
+        gateId: Keypair.generate().publicKey.toBase58()
+      }));
+    }
+    setCreateStep(1);
   };
 
   const switchEditorToCreateMode = () => {
@@ -5490,6 +5505,7 @@ export default function Page() {
       </Paper>
 
       <Grid container spacing={2.2}>
+        {builderMode === "advanced" && (
         <Grid size={{ xs: 12 }}>
           <Paper className="panel" sx={{ p: { xs: 1.2, md: 1.4 } }}>
             <Stack direction={{ xs: "column", md: "row" }} spacing={1.2}>
@@ -5520,6 +5536,7 @@ export default function Page() {
             </Stack>
           </Paper>
         </Grid>
+        )}
 
         <Grid size={{ xs: 12 }}>
           <Paper className="panel" sx={{ p: { xs: 2, md: 2.5 } }}>
@@ -5623,8 +5640,8 @@ export default function Page() {
                       ))}
                     </Grid>
                     <Stack direction="row" justifyContent="flex-end">
-                      <Button variant="contained" onClick={() => setCreateStep(1)}>
-                        Next: Configure
+                      <Button variant="contained" onClick={startGateConfiguration}>
+                        Continue with this policy
                       </Button>
                     </Stack>
                   </Stack>
@@ -5632,7 +5649,13 @@ export default function Page() {
 
                 {createStep === 1 && (
                   <Stack spacing={2}>
-                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2} alignItems={{ sm: "center" }}>
+                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2} alignItems={{ sm: "center" }} justifyContent="space-between">
+                      <Box>
+                        <Typography variant="h6">Set up {templates.find((item) => item.id === templateId)?.title}</Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          Only the information needed for this policy is shown. Technical fields stay out of the way.
+                        </Typography>
+                      </Box>
                       <FormControl sx={{ minWidth: 220 }}>
                         <InputLabel>Builder Mode</InputLabel>
                         <Select
@@ -5644,14 +5667,14 @@ export default function Page() {
                           <MenuItem value="advanced">Advanced</MenuItem>
                         </Select>
                       </FormControl>
-                      {!isAdvancedBuilderMode && (
-                        <Typography variant="body2" color="text.secondary">
-                          Simple mode hides raw PDA fields and uses DAO ID derivation.
-                        </Typography>
-                      )}
                     </Stack>
+                    {!isAdvancedBuilderMode && (
+                      <Alert severity="info" icon={<ShieldRoundedIcon />}>
+                        The gate address is generated automatically and your connected wallet becomes the authority. You can review both before signing.
+                      </Alert>
+                    )}
                     <Grid container spacing={2}>
-                      <Grid size={{ xs: 12, sm: 6 }}>
+                      {isAdvancedBuilderMode && <Grid size={{ xs: 12, sm: 6 }}>
                         <TextField
                           fullWidth
                           label="Gate ID"
@@ -5680,8 +5703,8 @@ export default function Page() {
                               : "Unique on-chain identifier for this gate."
                           }
                         />
-                      </Grid>
-                      <Grid size={{ xs: 12, sm: 6 }}>
+                      </Grid>}
+                      {isAdvancedBuilderMode && <Grid size={{ xs: 12, sm: 6 }}>
                         <TextField
                           fullWidth
                           label="Authority (Optional)"
@@ -5695,8 +5718,8 @@ export default function Page() {
                               : "Wallet allowed to manage this gate. Leave empty to use connected wallet."
                           }
                         />
-                      </Grid>
-                      <Grid size={{ xs: 12, sm: 6 }}>
+                      </Grid>}
+                      {isAdvancedBuilderMode && <Grid size={{ xs: 12, sm: 6 }}>
                         <FormControl fullWidth>
                           <InputLabel>Criteria Type</InputLabel>
                           <Select
@@ -5714,8 +5737,8 @@ export default function Page() {
                           </Select>
                           <FormHelperText>Rule users must satisfy to pass this gate.</FormHelperText>
                         </FormControl>
-                      </Grid>
-                      <Grid size={{ xs: 12, sm: 6 }}>
+                      </Grid>}
+                      {isAdvancedBuilderMode && <Grid size={{ xs: 12, sm: 6 }}>
                         <FormControl fullWidth>
                           <InputLabel>Gate Type</InputLabel>
                           <Select
@@ -5738,10 +5761,30 @@ export default function Page() {
                               : "Controls how often a user can pass the gate."}
                           </FormHelperText>
                         </FormControl>
-                      </Grid>
+                      </Grid>}
                     </Grid>
 
-                    <Paper variant="outlined" sx={{ p: 2 }}>
+                    <Accordion
+                      expanded={isAdvancedBuilderMode || showOptionalSetup}
+                      onChange={(_, expanded) => setShowOptionalSetup(expanded)}
+                      variant={isAdvancedBuilderMode ? "elevation" : "outlined"}
+                      disableGutters={isAdvancedBuilderMode}
+                      elevation={0}
+                      sx={{ borderRadius: 1, "&::before": { display: "none" } }}
+                    >
+                        <AccordionSummary
+                          expandIcon={<ExpandMoreRoundedIcon />}
+                          sx={{ display: isAdvancedBuilderMode ? "none" : "flex" }}
+                        >
+                          <Box>
+                            <Typography variant="subtitle2">Branding and integrations</Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              Optional — add a name, artwork, support link, Discord or Telegram settings.
+                            </Typography>
+                          </Box>
+                        </AccordionSummary>
+                        <AccordionDetails sx={{ p: 0 }}>
+                    <Paper variant="outlined" sx={{ p: 2, border: isAdvancedBuilderMode ? undefined : 0 }}>
                       <Stack spacing={1.4}>
                         <Typography variant="subtitle2">Metadata URI (Optional)</Typography>
                         <Typography variant="caption" color="text.secondary">
@@ -6045,7 +6088,12 @@ export default function Page() {
                         />
                       </Stack>
                     </Paper>
+                    </AccordionDetails>
+                    </Accordion>
 
+                    {(createForm.criteriaKind === "verifiedIdentity" ||
+                      createForm.criteriaKind === "verifiedWithWallet" ||
+                      createForm.criteriaKind === "combined") && (
                     <Paper variant="outlined" sx={{ p: 2 }}>
                       <Typography variant="subtitle2" sx={{ mb: 1 }}>
                         Verification platforms
@@ -6092,8 +6140,14 @@ export default function Page() {
                         })}
                       </ToggleButtonGroup>
                     </Paper>
+                    )}
 
                     <Grid container spacing={2}>
+                      {(createForm.criteriaKind === "minReputation" ||
+                        createForm.criteriaKind === "verifiedIdentity" ||
+                        createForm.criteriaKind === "verifiedWithWallet" ||
+                        createForm.criteriaKind === "combined" ||
+                        createForm.criteriaKind === "timeLockedReputation") && (
                       <Grid size={{ xs: 12 }}>
                         <Paper
                           variant="outlined"
@@ -6105,7 +6159,17 @@ export default function Page() {
                           }}
                         >
                           <Stack spacing={1}>
-                            <TextField
+                            {!isAdvancedBuilderMode && (
+                              <TextField
+                                fullWidth
+                                label="Community DAO address"
+                                placeholder="Paste the DAO address used in Grape Verification"
+                                value={createForm.daoId}
+                                onChange={(event) => updateCreateForm("daoId", event.target.value)}
+                                helperText="We derive the verification and reputation accounts for you."
+                              />
+                            )}
+                            {isAdvancedBuilderMode && <TextField
                               fullWidth
                               label="OG Reputation DAO ID"
                               value={createForm.reputationDaoId}
@@ -6113,8 +6177,8 @@ export default function Page() {
                                 updateCreateForm("reputationDaoId", event.target.value)
                               }
                               helperText="Used to derive OG Reputation Config PDA."
-                            />
-                            <TextField
+                            />}
+                            {isAdvancedBuilderMode && <TextField
                               fullWidth
                               label="Verification DAO ID"
                               value={createForm.verificationDaoId}
@@ -6122,15 +6186,15 @@ export default function Page() {
                                 updateCreateForm("verificationDaoId", event.target.value)
                               }
                               helperText="Used to derive Grape Verification Space PDA."
-                            />
-                            <TextField
+                            />}
+                            {isAdvancedBuilderMode && <TextField
                               fullWidth
                               label="Shared DAO ID (optional fallback)"
                               value={createForm.daoId}
                               onChange={(event) => updateCreateForm("daoId", event.target.value)}
                               helperText="Optional fallback if both systems use the same DAO ID."
-                            />
-                            {(derivedVineConfigFromDao || derivedGrapeSpaceFromDao) && (
+                            />}
+                            {isAdvancedBuilderMode && (derivedVineConfigFromDao || derivedGrapeSpaceFromDao) && (
                               <Stack spacing={0.4}>
                                 {derivedVineConfigFromDao && (
                                   <Typography variant="caption" color="text.secondary" className="mono">
@@ -6144,7 +6208,7 @@ export default function Page() {
                                 )}
                               </Stack>
                             )}
-                            <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                            {isAdvancedBuilderMode ? <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
                               <Button
                                 variant="outlined"
                                 onClick={handleApplyDaoDerivations}
@@ -6172,10 +6236,15 @@ export default function Page() {
                                   Open Grape Verification
                                 </Button>
                               )}
-                            </Stack>
+                            </Stack> : createForm.daoId.trim() && (derivedVineConfigFromDao || derivedGrapeSpaceFromDao) ? (
+                              <Alert severity="success">
+                                Community found. Required on-chain accounts will be added automatically.
+                              </Alert>
+                            ) : null}
                           </Stack>
                         </Paper>
                       </Grid>
+                      )}
                       {(createForm.criteriaKind === "minReputation" ||
                         createForm.criteriaKind === "combined" ||
                         createForm.criteriaKind === "timeLockedReputation") && (
@@ -6421,6 +6490,34 @@ export default function Page() {
                         ? "Review the criteria update payload, then apply it to the selected gate."
                         : "Review this payload, then initialize the gate on-chain."}
                     </Typography>
+                    {!isAdvancedBuilderMode && (
+                      <Paper variant="outlined" sx={{ p: 2 }}>
+                        <Stack spacing={1.2}>
+                          <Stack direction="row" justifyContent="space-between" spacing={2}>
+                            <Typography color="text.secondary">Policy</Typography>
+                            <Typography fontWeight={600} textAlign="right">
+                              {templates.find((item) => item.id === templateId)?.title ?? createForm.criteriaKind}
+                            </Typography>
+                          </Stack>
+                          <Divider />
+                          <Stack direction="row" justifyContent="space-between" spacing={2}>
+                            <Typography color="text.secondary">Community</Typography>
+                            <Typography className="mono" sx={{ fontSize: "0.76rem", wordBreak: "break-all", textAlign: "right" }}>
+                              {createForm.daoId || "Not required"}
+                            </Typography>
+                          </Stack>
+                          <Divider />
+                          <Stack direction="row" justifyContent="space-between" spacing={2}>
+                            <Typography color="text.secondary">Authority</Typography>
+                            <Typography className="mono" sx={{ fontSize: "0.76rem", wordBreak: "break-all", textAlign: "right" }}>
+                              {createForm.authority || connectedWalletAddress || "Connect a wallet"}
+                            </Typography>
+                          </Stack>
+                          <Alert severity="info">Your wallet will ask you to approve one on-chain transaction.</Alert>
+                        </Stack>
+                      </Paper>
+                    )}
+                    {isAdvancedBuilderMode && (
                     <Paper
                       variant="outlined"
                       sx={{
@@ -6439,16 +6536,17 @@ export default function Page() {
                         {JSON.stringify(gateBuilderPreview, null, 2)}
                       </Typography>
                     </Paper>
+                    )}
                     <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
                       <Button variant="outlined" onClick={() => setCreateStep(1)}>
                         Back
                       </Button>
-                      <Button
+                      {isAdvancedBuilderMode && <Button
                         variant="outlined"
                         onClick={() => void copyText(JSON.stringify(gateBuilderPreview, null, 2))}
                       >
                         Copy Payload
-                      </Button>
+                      </Button>}
                       <Button
                         variant="contained"
                         onClick={handleGateBuilderSubmit}
