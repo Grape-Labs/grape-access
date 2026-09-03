@@ -3982,6 +3982,10 @@ export default function AccessPage() {
     gateContext.criteriaVariant?.type === "verifiedIdentity" ||
     gateContext.criteriaVariant?.type === "verifiedWithWallet" ||
     gateContext.criteriaVariant?.type === "combined";
+  const requiresReputation =
+    gateContext.criteriaVariant?.type === "minReputation" ||
+    gateContext.criteriaVariant?.type === "timeLockedReputation" ||
+    gateContext.criteriaVariant?.type === "combined";
   const requiresWalletLink = Boolean(gateContext.criteriaVariant?.config.requireWalletLink);
   const identityIssueDetected = useMemo(() => {
     const diagnostic = `${memberDerive.message} ${memberCheck.message}`.toLowerCase();
@@ -4109,7 +4113,7 @@ export default function AccessPage() {
                         {gateContext.profile.description}
                       </Typography>
                     )}
-                    <Stack direction="row" spacing={1.2} alignItems="center" sx={{ mt: 0.8 }}>
+                    {isAdvancedMode && <Stack direction="row" spacing={1.2} alignItems="center" sx={{ mt: 0.8 }}>
                       <Box
                         sx={{
                           width: 11,
@@ -4122,7 +4126,7 @@ export default function AccessPage() {
                       <Typography sx={{ fontSize: "0.8rem", color: "rgba(230, 238, 252, 0.9)" }}>
                         Theme accent: <span className="mono">{gateContext.profile.accent}</span>
                       </Typography>
-                    </Stack>
+                    </Stack>}
                   </Box>
                 </Stack>
                 <Stack
@@ -4211,7 +4215,7 @@ export default function AccessPage() {
                   </Stack>
                 </Stack>
               </Stack>
-              <Box sx={{ mt: 0.5 }}>
+              {isAdvancedMode && <Box sx={{ mt: 0.5 }}>
                 {gateContext.gateTypeLabel && (
                   <Typography sx={{ mt: 0.7, fontSize: "0.85rem", color: "rgba(226, 236, 252, 0.9)" }}>
                     Gate Type: {gateContext.gateTypeLabel}
@@ -4291,7 +4295,7 @@ export default function AccessPage() {
                     )}
                   </Stack>
                 )}
-              </Box>
+              </Box>}
             </Box>
           </Box>
 
@@ -4300,10 +4304,10 @@ export default function AccessPage() {
               <StepLabel>Connect Wallet</StepLabel>
             </Step>
             <Step completed={gateContext.status === "ready"}>
-              <StepLabel>Load Gate Profile</StepLabel>
+              <StepLabel>Review requirements</StepLabel>
             </Step>
             <Step completed={memberCheck.status === "success" || memberCheck.status === "error"}>
-              <StepLabel>Run Access Check</StepLabel>
+              <StepLabel>Get access</StepLabel>
             </Step>
           </Stepper>
 
@@ -4311,13 +4315,13 @@ export default function AccessPage() {
             <Alert severity="info">Connect your wallet, then run your access check.</Alert>
           )}
 
-          <TextField
+          {isAdvancedMode && <TextField
             fullWidth
             label="Gate ID"
             value={memberForm.gateId}
             onChange={(event) => setMemberGateId(event.target.value)}
             helperText={`Gate ID identifier (not the gate PDA account address). Network: ${networkLabel}.`}
-          />
+          />}
           {isAdvancedMode && derivedGatePda && (
             <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mt: -0.6 }}>
               <Typography sx={{ color: "text.secondary", fontSize: "0.84rem" }}>
@@ -4334,7 +4338,7 @@ export default function AccessPage() {
             </Stack>
           )}
 
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
+          {isAdvancedMode && <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
             <Button
               variant="outlined"
               onClick={() => void handleLoadGate()}
@@ -4364,11 +4368,11 @@ export default function AccessPage() {
                 Last RPC Slot Probe: {lastRpcProbeSlot}
               </Typography>
             )}
-          </Stack>
+          </Stack>}
 
-          <Alert severity={gateContext.status === "error" ? "error" : gateContext.status === "ready" ? "success" : "info"}>
+          {(gateContext.status !== "ready" || isAdvancedMode) && <Alert severity={gateContext.status === "error" ? "error" : gateContext.status === "ready" ? "success" : "info"}>
             {gateContext.status === "loading" ? "Loading gate profile..." : gateContext.message}
-          </Alert>
+          </Alert>}
           {suggestedCluster && (
             <Button
               variant="outlined"
@@ -4380,14 +4384,36 @@ export default function AccessPage() {
           )}
 
           <Paper variant="outlined" sx={{ p: 2, borderColor: "rgba(109, 184, 255, 0.24)" }}>
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>
-              Eligibility Summary
+            <Typography variant="h6" sx={{ mb: 0.35 }}>
+              What you need
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.4 }}>
+              Complete any missing requirement, then return here to check your access.
             </Typography>
             <Stack spacing={0.6}>
-              {eligibilitySummary.map((line) => (
-                <Typography key={line} sx={{ fontSize: "0.9rem", color: "text.secondary" }}>
-                  • {line}
-                </Typography>
+              {eligibilitySummary.map((line, index) => (
+                <Stack key={line} direction="row" spacing={1} alignItems="flex-start">
+                  <Box
+                    sx={{
+                      width: 24,
+                      height: 24,
+                      flex: "0 0 24px",
+                      borderRadius: "50%",
+                      display: "grid",
+                      placeItems: "center",
+                      fontSize: "0.75rem",
+                      fontWeight: 700,
+                      color: gateContext.profile.accent,
+                      border: `1px solid ${gateContext.profile.accent}88`,
+                      backgroundColor: `${gateContext.profile.accent}18`
+                    }}
+                  >
+                    {index + 1}
+                  </Box>
+                  <Typography sx={{ fontSize: "0.92rem", color: "text.secondary", pt: 0.2 }}>
+                    {line}
+                  </Typography>
+                </Stack>
               ))}
             </Stack>
             {gateVerificationPlatforms.length > 0 && (
@@ -4438,8 +4464,22 @@ export default function AccessPage() {
                 })}
               </Stack>
             )}
+            {gateContext.status === "ready" && (requiresIdentityVerification || requiresReputation) && (
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mt: 1.6 }}>
+                {requiresIdentityVerification && (
+                  <Button href={verificationPortalUrl} target="_blank" rel="noreferrer" variant="outlined">
+                    Verify my identity
+                  </Button>
+                )}
+                {requiresReputation && vineDaoLink && (
+                  <Button href={vineDaoLink} target="_blank" rel="noreferrer" variant="outlined">
+                    View my reputation
+                  </Button>
+                )}
+              </Stack>
+            )}
           </Paper>
-          {gateContext.status === "ready" && requiresIdentityVerification && (
+          {gateContext.status === "ready" && requiresIdentityVerification && identityIssueDetected && (
             <Alert
               severity={identityIssueDetected ? "warning" : "info"}
               action={
@@ -4466,24 +4506,14 @@ export default function AccessPage() {
             </Alert>
           )}
 
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2} alignItems={{ sm: "center" }}>
-            <FormControl sx={{ minWidth: 220 }}>
-              <InputLabel>Access Mode</InputLabel>
-              <Select
-                label="Access Mode"
-                value={accessViewMode}
-                onChange={(event) => setAccessViewMode(event.target.value as AccessViewMode)}
-              >
-                <MenuItem value="simple">Simple</MenuItem>
-                <MenuItem value="advanced">Advanced</MenuItem>
-              </Select>
-            </FormControl>
-            {!isAdvancedMode && (
-              <Typography sx={{ color: "text.secondary", fontSize: "0.88rem" }}>
-                Accounts auto-derive after gate load.
-              </Typography>
-            )}
-          </Stack>
+          {isAdvancedMode && (
+            <Alert
+              severity="warning"
+              action={<Button size="small" onClick={() => setAccessViewMode("simple")}>Exit troubleshooting</Button>}
+            >
+              Troubleshooting mode exposes raw accounts, network details, and diagnostic tools.
+            </Alert>
+          )}
 
           {isAdvancedMode && (
             <>
@@ -4615,7 +4645,7 @@ export default function AccessPage() {
             <Alert severity="error">{memberDerive.message}</Alert>
           )}
 
-          <FormControlLabel
+          {isAdvancedMode && <FormControlLabel
             control={
               <Switch
                 checked={memberForm.storeRecord}
@@ -4623,7 +4653,7 @@ export default function AccessPage() {
               />
             }
             label="Store my check record on-chain"
-          />
+          />}
 
           {isAdvancedMode ? (
             <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
@@ -4878,6 +4908,17 @@ export default function AccessPage() {
                 </>
               )}
             </Paper>
+          )}
+
+          {!isAdvancedMode && (
+            <Button
+              variant="text"
+              size="small"
+              onClick={() => setAccessViewMode("advanced")}
+              sx={{ alignSelf: "center", color: "text.secondary", textTransform: "none" }}
+            >
+              Having trouble? Open diagnostics
+            </Button>
           )}
 
           <Box>
