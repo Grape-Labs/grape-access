@@ -4164,6 +4164,7 @@ export default function Page() {
             `SDK authority fetch failed (${primaryError.message}) and raw scan failed (${rawScanError}).`
           );
         }
+        throw new Error(`Raw gate scan unavailable: ${rawScanError}`);
       }
     }
 
@@ -4182,8 +4183,8 @@ export default function Page() {
       ]);
       const hasKnownStats =
         totalChecksRaw !== undefined && successfulChecksRaw !== undefined;
-      const totalChecks = totalChecksRaw ?? "0";
-      const successfulChecks = successfulChecksRaw ?? "0";
+      const totalChecks = totalChecksRaw ?? "unavailable";
+      const successfulChecks = successfulChecksRaw ?? "unavailable";
       return {
         pda:
           entry.publicKey && typeof entry.publicKey.toBase58 === "function"
@@ -5758,7 +5759,7 @@ export default function Page() {
                           <FormHelperText>
                             {isEditMode
                               ? "Gate type is unchanged in edit mode."
-                              : "Controls how often a user can pass the gate."}
+                              : "Gate lifecycle setting; enforcement depends on the deployed program. Single Use is not a reward claim limit."}
                           </FormHelperText>
                         </FormControl>
                       </Grid>}
@@ -6268,7 +6269,7 @@ export default function Page() {
                               label="Min Points"
                               value={createForm.minPoints}
                               onChange={(event) => updateCreateForm("minPoints", event.target.value)}
-                              helperText="Minimum reputation points required."
+                              helperText="Minimum points this wallet must have in the configured community and season; points from other seasons do not count."
                             />
                           </Grid>
                           <Grid size={{ xs: 12, sm: isAdvancedBuilderMode ? 3 : 6 }}>
@@ -6277,7 +6278,7 @@ export default function Page() {
                               label="Season"
                               value={createForm.season}
                               onChange={(event) => updateCreateForm("season", event.target.value)}
-                              helperText="Reputation season number."
+                              helperText="Exact community season to check. Reputation is wallet-specific, not proof of a unique person."
                             />
                           </Grid>
                         </>
@@ -6311,6 +6312,16 @@ export default function Page() {
                             }
                             label="Require wallet link to verified identity"
                           />
+                          <Alert severity={createForm.requireWalletLink ? "info" : "warning"}>
+                            {createForm.requireWalletLink
+                              ? "Require both the reputation threshold and a currently verified identity linked to the checked wallet. Accepted platforms are alternatives, not multiple required verifications."
+                              : "Wallet link is OFF: this policy does not require the verified identity to be linked to the checked wallet. Enable it when membership requires that relationship."}
+                            {" "}Verification and reputation do not establish human uniqueness. Configure identity and wallet links in the Verification dashboard.
+                          </Alert>
+                          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                            Combined criteria do not support a reputation duration. Time-locked reputation is a separate policy; selecting it replaces the combined requirements.
+                            Access checks do not enforce reward entitlements. Single Use must not be treated as one reward per person.
+                          </Typography>
                         </Grid>
                       )}
 
@@ -6323,7 +6334,7 @@ export default function Page() {
                             onChange={(event) =>
                               updateCreateForm("minHoldDurationSeconds", event.target.value)
                             }
-                            helperText="How long reputation must be held before passing."
+                            helperText="Duration in seconds checked by the program. Local source approximates this from the last update slot; it does not prove continuous holding."
                           />
                         </Grid>
                       )}

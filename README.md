@@ -203,3 +203,9 @@ Console now prefers access-first SDK methods (`GrapeAccessClient`, `initializeAc
 ## License
 
 Private project codebase. Respect your organization’s distribution and usage policy.
+
+## Eligibility and rewards boundary
+
+Access evaluates community requirements; Verification manages account ownership and wallet links. Access results do not establish reward eligibility or unique-person status. See [the implementation review and entitlement integration plan](docs/eligibility-and-entitlements.md) for SDK/program evidence, lifecycle limitations, remaining abuse paths and validation results.
+
+Run focused eligibility tests with `npm test`.

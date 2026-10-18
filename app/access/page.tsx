@@ -52,6 +52,8 @@ import * as GPassSdk from "@grapenpm/grape-access-sdk";
 import * as GrapeVerificationRegistry from "@grapenpm/grape-verification-registry";
 import * as VineReputationClient from "@grapenpm/vine-reputation-client";
 
+import { inspectRequirement, reputationIssues, identityIssue, walletLinkIssue, RequestScope, type RequirementResult } from "../lib/eligibility";
+
 interface WalletProvider {
   publicKey?: PublicKey | null;
   signTransaction?: (transaction: Transaction) => Promise<Transaction>;
@@ -653,19 +655,9 @@ function getIdentityGateEligibilityIssue(args: {
   if (!parsed) {
     return "Identity account data could not be parsed.";
   }
-  if (!parsed.space.equals(grapeSpace)) {
-    return "Identity account does not belong to this gate's verification space.";
-  }
-  if (!parsed.verified) {
-    return "Identity account is not currently verified.";
-  }
-  if (parsed.expiresAt > 0 && nowUnix > parsed.expiresAt) {
-    return "Identity verification is expired.";
-  }
-  if (allowedPlatforms.length > 0 && !allowedPlatforms.includes(parsed.platform)) {
-    return `Identity platform ${parsed.platform} is not allowed by this gate.`;
-  }
-  return null;
+  return identityIssue({ space: parsed.space.toBase58(), expectedSpace: grapeSpace.toBase58(),
+    verified: parsed.verified, expiresAt: parsed.expiresAt, now: nowUnix,
+    platform: parsed.platform, platforms: allowedPlatforms });
 }
 
 function discoverVerificationDaoOffsets(spaceData: Uint8Array, resolvedSpace: PublicKey) {
@@ -857,8 +849,9 @@ async function sendInstructionWithWallet(args: {
   connection: Connection;
   wallet: WalletProvider;
   instruction: TransactionInstruction;
+  isCurrent?: () => boolean;
 }): Promise<string> {
-  const { connection, wallet, instruction } = args;
+  const { connection, wallet, instruction, isCurrent } = args;
   if (!wallet.publicKey || !wallet.signTransaction) {
     throw new Error("Connected wallet does not support transaction signing.");
   }
@@ -868,10 +861,12 @@ async function sendInstructionWithWallet(args: {
   const latestBlockhash = await connection.getLatestBlockhash("confirmed");
   transaction.recentBlockhash = latestBlockhash.blockhash;
 
+  if (isCurrent && !isCurrent()) throw new Error("Wallet or community changed; check cancelled.");
   const signed = await wallet.signTransaction(transaction);
+  if (isCurrent && !isCurrent()) throw new Error("Wallet or community changed; check cancelled before submission.");
   const signature = await connection.sendRawTransaction(signed.serialize());
   try {
-    await connection.confirmTransaction(
+    const confirmation = await connection.confirmTransaction(
       {
         signature,
         blockhash: latestBlockhash.blockhash,
@@ -879,6 +874,7 @@ async function sendInstructionWithWallet(args: {
       },
       "confirmed"
     );
+    if (confirmation.value.err) throw new Error(`Access transaction failed: ${JSON.stringify(confirmation.value.err)}`);
   } catch (error) {
     // Preserve signature so callers can perform recovery checks if confirmation times out.
     if (error && typeof error === "object") {
@@ -1183,30 +1179,16 @@ async function validateCheckGateInputs(args: {
           const decoded = await decodeVineReputationFlexible(repInfo.data);
           const expectedSeason = asNumberValue(config.season);
           const vineConfig = asPublicKeyValue(config.vineConfig);
-          if (!decoded.user.equals(user)) {
-            issues.push(`Reputation account user ${decoded.user.toBase58()} does not match connected wallet.`);
+          if (!vineConfig || expectedSeason === undefined || config.minPoints === undefined) {
+            throw new Error("Reputation policy could not be decoded.");
           }
-          if (expectedSeason !== undefined && decoded.season !== expectedSeason) {
-            issues.push(
-              `Reputation account season ${decoded.season} does not match gate season ${expectedSeason}.`
-            );
-          }
-          if (vineConfig && expectedSeason !== undefined) {
-            const [expectedReputationPda] = VineReputationClient.getReputationPda(
-              vineConfig,
-              user,
-              expectedSeason,
-              VINE_REPUTATION_PROGRAM_ID
-            );
-            if (!expectedReputationPda.equals(reputationAccount)) {
-              issues.push(
-                `Reputation account does not match expected PDA ${expectedReputationPda.toBase58()} for this gate.`
-              );
-            }
-          }
+          const [expectedPda] = VineReputationClient.getReputationPda(vineConfig, user, expectedSeason, VINE_REPUTATION_PROGRAM_ID);
+          issues.push(...reputationIssues({ wallet: decoded.user.toBase58(), expectedWallet: user.toBase58(),
+            season: decoded.season, expectedSeason, account: reputationAccount.toBase58(),
+            expectedAccount: expectedPda.toBase58(), points: decoded.points.toString(), minimum: String(config.minPoints) }));
         } catch (error) {
           const detail = error instanceof Error ? error.message : "decode failed";
-          issues.push(`Reputation account is not a valid Vine Reputation account (${detail}).`);
+          throw new Error(`Reputation account could not be decoded (${detail}).`);
         }
       }
     }
@@ -1223,6 +1205,7 @@ async function validateCheckGateInputs(args: {
       ? await resolveVerificationSpaceContext(connection, grapeSpaceInput)
       : null;
   const grapeSpace = resolvedVerificationSpace?.space ?? grapeSpaceInput;
+  if (requiresIdentity && !grapeSpace) throw new Error("Verification community configuration is unavailable.");
 
   if (requiresIdentity) {
     if (!identityAccount) {
@@ -1242,6 +1225,7 @@ async function validateCheckGateInputs(args: {
           allowedPlatforms,
           nowUnix: Math.floor(Date.now() / 1000)
         });
+        if (identityIssue?.includes("could not be parsed")) throw new Error(identityIssue);
         if (identityIssue) {
           issues.push(identityIssue);
         }
@@ -1263,24 +1247,14 @@ async function validateCheckGateInputs(args: {
         parsedLink = GrapeVerificationRegistry.parseLink(linkInfo.data);
       } catch (error) {
         const detail = error instanceof Error ? error.message : "parse failed";
-        issues.push(`Link account is not a valid verification link account (${detail}).`);
+        throw new Error(`Link account could not be decoded (${detail}).`);
       }
       if (parsedLink) {
-        if (identityAccount && !parsedLink.identity.equals(identityAccount)) {
-          issues.push("Link account points to a different identity account.");
-        }
         const walletSaltCandidates = resolvedVerificationSpace?.saltCandidates ?? [];
-        if (walletSaltCandidates.length > 0) {
-          const walletHashes = walletSaltCandidates.map((salt) =>
-            GrapeVerificationRegistry.walletHash(salt, user)
-          );
-          if (!walletHashes.some((hash) => byteArraysEqual(hash, parsedLink.walletHash))) {
-            const actualLinkHash = Buffer.from(parsedLink.walletHash).toString("hex").slice(0, 24);
-            issues.push(
-              `Link account wallet hash (${actualLinkHash}) does not match this wallet for the gate's salts.`
-            );
-          }
-        }
+        if (!walletSaltCandidates.length) throw new Error("Wallet-link salt is unavailable; wallet ownership cannot be checked.");
+        const matches = walletSaltCandidates.some((salt) => byteArraysEqual(GrapeVerificationRegistry.walletHash(salt, user), parsedLink.walletHash));
+        const issue = walletLinkIssue(Boolean(identityAccount?.equals(parsedLink.identity)), matches);
+        if (issue) issues.push(issue);
       }
     }
   } else if (requiresLink) {
@@ -1472,8 +1446,8 @@ async function fetchGateWithCompatibility(
         if (decoded) {
           gate = decoded;
         }
-      } catch {
-        // Ignore raw fallback failures.
+      } catch (error) {
+        sdkError = error instanceof Error ? error : new Error("RPC account scan unavailable.");
       }
     }
   }
@@ -1514,38 +1488,18 @@ async function fetchGateWithCompatibility(
 
 async function resolveVerificationSpaceContext(connection: Connection, grapeSpace: PublicKey) {
   const tryReadSpace = async (candidate: PublicKey) => {
-    try {
-      const space = await GrapeVerificationRegistry.fetchSpace(connection, candidate);
-      if (!space || !space.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
-        return null;
-      }
-      const saltCandidates = extractVerificationSaltCandidatesForResolvedSpace(space.data, candidate);
-      if (saltCandidates.length === 0) {
-        return null;
-      }
-      return {
-        space: candidate,
-        saltCandidates,
-        spaceData: Uint8Array.from(space.data)
-      };
-    } catch {
-      return null;
-    }
+    // fetchSpace is a direct RPC read. Propagate transport failures instead of
+    // treating them as an absent space and then reporting an identity mismatch.
+    const space = await GrapeVerificationRegistry.fetchSpace(connection, candidate);
+    if (!space || !space.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) return null;
+    const saltCandidates = extractVerificationSaltCandidatesForResolvedSpace(space.data, candidate);
+    if (!saltCandidates.length) throw new Error("Verification space layout/salt is unavailable.");
+    return { space: candidate, saltCandidates, spaceData: Uint8Array.from(space.data) };
   };
-
   const direct = await tryReadSpace(grapeSpace);
-  if (direct) {
-    return direct;
-  }
-
-  try {
-    const [derivedSpace] = GrapeVerificationRegistry.deriveSpacePda(grapeSpace);
-    if (!derivedSpace.equals(grapeSpace)) {
-      return await tryReadSpace(derivedSpace);
-    }
-  } catch {
-    // Ignore and return null.
-  }
+  if (direct) return direct;
+  const [derivedSpace] = GrapeVerificationRegistry.deriveSpacePda(grapeSpace);
+  if (!derivedSpace.equals(grapeSpace)) return tryReadSpace(derivedSpace);
   return null;
 }
 
@@ -1857,7 +1811,7 @@ async function fetchGateMetadataDocument(metadataUri: string) {
 
 function formatPlatformList(platforms: number[]) {
   if (!platforms.length) {
-    return "any supported platform";
+    return "no platforms (none configured)";
   }
   return platforms.map((entry) => PLATFORM_LABELS[entry] ?? `Platform ${entry}`).join(", ");
 }
@@ -1911,7 +1865,7 @@ function renderEligibilitySummary(criteriaVariant?: { type: string; config: Reco
       const holdSeconds = asNumberValue(config.minHoldDurationSeconds) ?? 0;
       return [
         `Hold at least ${minPoints} reputation points (season ${season}).`,
-        `Maintain score for ${holdSeconds} seconds.`
+        `Duration requirement: ${holdSeconds} seconds. Program validation is required; this is not proof of continuous score history.`
       ];
     }
     case "multiDao": {
@@ -1954,6 +1908,9 @@ export default function AccessPage() {
   const [networkSettingsOpen, setNetworkSettingsOpen] = useState(false);
   const [accessViewMode, setAccessViewMode] = useState<AccessViewMode>("simple");
   const autoDeriveKeyRef = useRef("");
+  const requestScope = useRef(new RequestScope());
+  const [requirements, setRequirements] = useState<RequirementResult[]>([]);
+  const [requirementsBusy, setRequirementsBusy] = useState(false);
 
   const [memberForm, setMemberForm] = useState<MemberFormState>(defaultMemberForm);
   const [memberCheck, setMemberCheck] = useState<MemberCheckState>({
@@ -2116,6 +2073,17 @@ export default function AccessPage() {
 
   const isWalletConnected = Boolean(wallet.connected && wallet.publicKey);
   const connectedWalletAddress = wallet.publicKey?.toBase58() ?? "";
+  const selectionKey = JSON.stringify([connectedWalletAddress, memberForm.gateId, rpcEndpoint]);
+  requestScope.current.select(selectionKey);
+  useEffect(() => {
+    setMemberCheck({ status: "idle", message: "Run a fresh access check for this wallet and community." });
+    setRequirements([]);
+    setRequirementsBusy(false);
+    setDiscordSync(defaultDiscordSyncState);
+    setMemberForm(prev => ({ ...prev, reputationAccount: "", identityAccount: "", linkAccount: "", tokenAccount: "" }));
+    autoDeriveKeyRef.current = "";
+  }, [selectionKey]);
+
 
   const memberPreview = useMemo(
     () => ({
@@ -2188,11 +2156,12 @@ export default function AccessPage() {
     linkPda?: string;
     verifiedAt?: string;
   }) => {
+    const isCurrent = requestScope.current.capture();
     if (!discordVerificationContext || !args.passed) {
       return;
     }
 
-    setDiscordSync({
+    if (isCurrent()) setDiscordSync({
       status: "pending",
       message: "Syncing verification result to Discord bot..."
     });
@@ -2224,7 +2193,7 @@ export default function AccessPage() {
         throw new Error(payload.error || `Callback failed (${response.status}).`);
       }
 
-      setDiscordSync({
+      if (isCurrent()) setDiscordSync({
         status: "success",
         message: payload.callbackId
           ? `Discord sync complete. Callback ID: ${payload.callbackId}`
@@ -2233,7 +2202,7 @@ export default function AccessPage() {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Discord sync failed. Please retry /check in Discord.";
-      setDiscordSync({
+      if (isCurrent()) setDiscordSync({
         status: "error",
         message: `Access passed, but Discord sync failed: ${message}`
       });
@@ -2358,10 +2327,11 @@ export default function AccessPage() {
     gateIdRaw: string,
     { silent = true }: { silent?: boolean } = {}
   ): Promise<{ criteriaVariant: { type: string; config: Record<string, unknown> } } | null> => {
+    const isCurrent = requestScope.current.capture();
     const trimmedGateId = gateIdRaw.trim();
     if (!trimmedGateId) {
-      setSuggestedCluster(null);
-      setGateContext({
+      if (isCurrent()) setSuggestedCluster(null);
+      if (isCurrent()) setGateContext({
         status: "idle",
         message: "Enter a gate ID to load community profile and requirements.",
         profile: DEFAULT_COMMUNITY_PROFILE
@@ -2374,15 +2344,15 @@ export default function AccessPage() {
       gateId = parsePublicKey("Gate ID", trimmedGateId, true)!;
     } catch {
       if (trimmedGateId.length < 32) {
-        setSuggestedCluster(null);
-        setGateContext({
+        if (isCurrent()) setSuggestedCluster(null);
+        if (isCurrent()) setGateContext({
           status: "idle",
           message: "Continue entering the gate ID.",
           profile: DEFAULT_COMMUNITY_PROFILE
         });
       } else {
-        setSuggestedCluster(null);
-        setGateContext({
+        if (isCurrent()) setSuggestedCluster(null);
+        if (isCurrent()) setGateContext({
           status: "error",
           message: "Gate ID format is invalid.",
           profile: DEFAULT_COMMUNITY_PROFILE
@@ -2392,8 +2362,8 @@ export default function AccessPage() {
     }
 
     if (!connection) {
-      setSuggestedCluster(null);
-      setGateContext({
+      if (isCurrent()) setSuggestedCluster(null);
+      if (isCurrent()) setGateContext({
         status: "error",
         gateId: gateId.toBase58(),
         message: "Choose a valid RPC endpoint first.",
@@ -2402,13 +2372,14 @@ export default function AccessPage() {
       return null;
     }
 
-    setGateContext((prev) => ({
+    if (isCurrent()) setGateContext((prev) => ({
       ...prev,
       status: "loading",
       gateId: gateId.toBase58(),
       reputationDaoId: undefined,
       verificationDaoId: undefined,
       metadataUri: undefined,
+      criteriaVariant: undefined,
       message: "Loading gate configuration...",
       profile: resolveCommunityProfile(gateId.toBase58())
     }));
@@ -2416,12 +2387,13 @@ export default function AccessPage() {
     let compatibilityErrorMessage: string | undefined;
     try {
       const probeSlot = await connection.getSlot("processed");
-      setLastRpcProbeSlot(probeSlot);
+      if (isCurrent()) setLastRpcProbeSlot(probeSlot);
       const client = await getClient({ readOnly: true });
       const { gate, sdkError } = await fetchGateWithCompatibility(client, gateId, connection);
       compatibilityErrorMessage = sdkError?.message;
 
       if (!gate) {
+        if (sdkError) throw new Error(`Gate lookup unavailable: ${sdkError.message}`);
         throw new Error("Gate not found for this gate ID.");
       }
 
@@ -2480,7 +2452,7 @@ export default function AccessPage() {
         }
       }
 
-      setGateContext({
+      if (isCurrent()) setGateContext({
         status: "ready",
         gateId: gateId.toBase58(),
         reputationDaoId: derivedReputationDaoId,
@@ -2491,9 +2463,9 @@ export default function AccessPage() {
         gateTypeLabel: extractGateTypeLabel(gateRecord.gateType ?? gateRecord.accessType),
         profile: resolveCommunityProfile(gateId.toBase58(), profileOverrides)
       });
-      setSuggestedCluster(null);
+      if (isCurrent()) setSuggestedCluster(null);
 
-      return { criteriaVariant };
+      return isCurrent() ? { criteriaVariant } : null;
     } catch (error) {
       let message = error instanceof Error ? error.message : "Failed to load gate.";
       let nextSuggestedCluster: ClusterKind | null = null;
@@ -2522,8 +2494,8 @@ export default function AccessPage() {
             "Gate not found for this gate ID on the selected network. Check cluster/RPC or verify the gate exists on-chain.";
         }
       }
-      setSuggestedCluster(nextSuggestedCluster);
-      setGateContext({
+      if (isCurrent()) setSuggestedCluster(nextSuggestedCluster);
+      if (isCurrent()) setGateContext({
         status: "error",
         gateId: gateId.toBase58(),
         message,
@@ -2615,9 +2587,10 @@ export default function AccessPage() {
   const handleAutoDeriveMemberAccounts = async (
     { silent = false, skipGateReload = false }: { silent?: boolean; skipGateReload?: boolean } = {}
   ): Promise<MemberFormState | null> => {
+    const isCurrent = requestScope.current.capture();
     if (!wallet.publicKey || !connection) {
       const message = "Connect wallet and choose a valid RPC endpoint first.";
-      setMemberDerive({ status: "error", message });
+      if (isCurrent()) setMemberDerive({ status: "error", message });
       if (!silent) {
         notify(message, "error");
       }
@@ -2627,14 +2600,14 @@ export default function AccessPage() {
     const gateIdRaw = memberForm.gateId.trim();
     if (!gateIdRaw) {
       const message = "Gate ID is required before auto-deriving accounts.";
-      setMemberDerive({ status: "error", message });
+      if (isCurrent()) setMemberDerive({ status: "error", message });
       if (!silent) {
         notify(message, "error");
       }
       return null;
     }
 
-    setMemberDeriveBusy(true);
+    if (isCurrent()) setMemberDeriveBusy(true);
     try {
       const loaded =
         skipGateReload &&
@@ -2645,7 +2618,7 @@ export default function AccessPage() {
           : await loadGateContext(gateIdRaw, { silent });
       if (!loaded) {
         const message = "Unable to derive accounts until gate profile loads successfully.";
-        setMemberDerive({ status: "error", message });
+        if (isCurrent()) setMemberDerive({ status: "error", message });
         if (!silent) {
           notify(message, "error");
         }
@@ -3059,11 +3032,11 @@ export default function AccessPage() {
         addBlocker(linkError);
       }
 
-      setMemberForm((prev) => ({ ...prev, ...updates }));
+      if (isCurrent()) setMemberForm((prev) => ({ ...prev, ...updates }));
       const mergedForm = { ...memberForm, ...updates };
       if (blockers.length > 0) {
         const message = `${blockers.join(" ")}${notes.length ? ` ${notes.join(" ")}` : ""}`;
-        setMemberDerive({ status: "error", message });
+        if (isCurrent()) setMemberDerive({ status: "error", message });
         if (!silent) {
           notify(message, "error");
         }
@@ -3075,15 +3048,15 @@ export default function AccessPage() {
           : notes.length
             ? notes.join(" ")
             : "No accounts needed for this gate type.";
-      setMemberDerive({ status: "success", message });
+      if (isCurrent()) setMemberDerive({ status: "success", message });
       if (!silent) {
         notify(message, "success");
       }
-      return mergedForm;
+      return isCurrent() ? mergedForm : null;
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Failed to auto-derive member accounts.";
-      setMemberDerive({ status: "error", message });
+      if (isCurrent()) setMemberDerive({ status: "error", message });
       if (!silent) {
         notify(message, "error");
       }
@@ -3121,16 +3094,66 @@ export default function AccessPage() {
     gateLoadBusy
   ]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const isCurrent = requestScope.current.capture();
+    const criteria = gateContext.criteriaVariant;
+    if (gateContext.status !== "ready" || gateContext.gateId !== memberForm.gateId || !criteria) {
+      setRequirements([]);
+      return;
+    }
+    const { type, config } = criteria;
+    const rows: Array<{ label: string; action: string; type?: string }> = [];
+    if (["combined", "minReputation", "timeLockedReputation"].includes(type)) rows.push({
+      label: `Reputation: at least ${String(config.minPoints)} points in season ${String(config.season)}`,
+      action: "Open View my reputation for this community and earn the missing points in the required season.", type: "minReputation" });
+    if (["combined", "verifiedIdentity", "verifiedWithWallet"].includes(type)) rows.push({
+      label: `Identity verified on an accepted platform: ${formatPlatformList(normalizePlatforms(config.platforms))}`,
+      action: "Open Verification to verify or renew an accepted account in this community.", type: "verifiedIdentity" });
+    if (type === "verifiedWithWallet" || (type === "combined" && Boolean(config.requireWalletLink))) rows.push({
+      label: "Verified identity linked to this wallet",
+      action: "Open Verification and link the connected wallet to your verified identity.", type: "verifiedWithWallet" });
+    if (type === "timeLockedReputation") rows.push({ label: `Duration: ${String(config.minHoldDurationSeconds)} seconds`,
+      action: "Run Check My Access for the program's duration result. Continuous holding history is not established here." });
+    if (!rows.length) rows.push({ label: "Gate-specific requirements", action: "Run Check My Access to validate this policy with the program." });
+    setRequirements(rows.map(row => ({ ...row, state: "not-checked", detail: "Not checked." })));
+    if (!wallet.publicKey || !connection || memberDeriveBusy) { setRequirementsBusy(false); return; }
+    setRequirementsBusy(true);
+    const user = wallet.publicKey;
+    void Promise.all(rows.map(row => row.type ? inspectRequirement(row.label, row.action, async () => {
+      let reputationAccount = asPublicKeyValue(memberForm.reputationAccount);
+      if (row.type === "minReputation" && !reputationAccount) {
+        const configKey = asPublicKeyValue(config.vineConfig);
+        const season = asNumberValue(config.season);
+        if (!configKey || season === undefined) throw new Error("Community or season configuration is unavailable.");
+        [reputationAccount] = VineReputationClient.getReputationPda(configKey, user, season, VINE_REPUTATION_PROGRAM_ID);
+      }
+      if (row.type !== "minReputation" && !memberForm.identityAccount && memberDerive.status === "error") {
+        throw new Error(`Identity discovery did not complete: ${memberDerive.message}`);
+      }
+      return validateCheckGateInputs({ connection, user,
+        criteriaVariant: { type: row.type!, config },
+        reputationAccount: row.type === "minReputation" ? reputationAccount : undefined,
+        identityAccount: row.type !== "minReputation" ? asPublicKeyValue(memberForm.identityAccount) : undefined,
+        linkAccount: row.type === "verifiedWithWallet" ? asPublicKeyValue(memberForm.linkAccount) : undefined });
+    }) : Promise.resolve({ ...row, state: "not-checked" as const, detail: "Requires program validation." })))
+      .then(results => { if (!cancelled && isCurrent()) { setRequirements(results); setRequirementsBusy(false); } });
+    return () => { cancelled = true; };
+  }, [selectionKey, gateContext.status, gateContext.criteriaVariant, memberForm.reputationAccount,
+    memberForm.identityAccount, memberForm.linkAccount, memberDeriveBusy, memberDerive.status, memberDerive.message, connection]);
+
   const handleMemberCheck = async () => {
+    const isCurrent = requestScope.current.capture();
     if (!wallet.publicKey || !connection) {
       const message = "Connect wallet and choose a valid RPC endpoint first.";
-      setMemberCheck({ status: "error", message });
+      if (isCurrent()) setMemberCheck({ status: "error", message });
       notify(message, "error");
       return;
     }
 
-    setMemberBusy(true);
-    setDiscordSync(defaultDiscordSyncState);
+    if (isCurrent()) setMemberBusy(true);
+    if (isCurrent()) setMemberCheck({ status: "idle", message: "Checking access…" });
+    if (isCurrent()) setDiscordSync(defaultDiscordSyncState);
     let latestCheckParams: CheckGateInputParams | null = null;
     let latestClient: Record<string, unknown> | null = null;
     let attemptedOnChainTx = false;
@@ -3145,6 +3168,7 @@ export default function AccessPage() {
           "Unable to prepare required accounts. For identity-based gates, provide Identity Value or Identity/Link account and retry."
         );
       }
+      if (!isCurrent()) return;
       const effectiveForm = derivedForm ?? memberForm;
 
       const params = {
@@ -3176,6 +3200,7 @@ export default function AccessPage() {
         throw new Error(`Check input validation failed. ${validationIssues.join(" ")}`);
       }
 
+      if (!isCurrent()) return;
       const shouldStoreRecord = Boolean(effectiveForm.storeRecord);
       const [gatePda] = await findPrimaryAccessPda(params.gateId, GPASS_PROGRAM_ID);
       const checkedAtDate = new Date();
@@ -3257,10 +3282,12 @@ export default function AccessPage() {
             ...params,
             storeRecord: true
           });
+          if (!isCurrent()) return;
           signature = await sendInstructionWithWallet({
             connection,
             wallet: wallet as unknown as WalletProvider,
-            instruction
+            instruction,
+            isCurrent
           });
           result = {
             mode: "transaction",
@@ -3277,6 +3304,7 @@ export default function AccessPage() {
               "SDK client is missing checkAccess/checkGate and buildCheckAccessInstruction/buildCheckGateInstruction."
             );
           }
+          if (!isCurrent()) return;
           result = await Promise.resolve(checkMethod.call(client, params));
           signature = extractSignature(result);
           // On-chain check_gate returns an error when the gate is not passed.
@@ -3321,18 +3349,19 @@ export default function AccessPage() {
           unitsConsumed: simulation.value.unitsConsumed ?? null
         };
       }
+      if (!isCurrent()) return;
       const resultMessage =
         passed === true
           ? shouldStoreRecord
-            ? "Access granted for this gate."
-            : "Access granted (RPC simulation, no transaction sent)."
+            ? "Access eligible for this gate at the time of this check."
+            : "Access eligible in RPC simulation (no transaction sent)."
           : passed === false
             ? "Access not granted for this gate."
             : signature
               ? "Check transaction submitted."
               : "Check completed.";
 
-      setMemberCheck({
+      if (isCurrent()) setMemberCheck({
         status: "success",
         message: resultMessage,
         signature,
@@ -3361,6 +3390,7 @@ export default function AccessPage() {
         passed === false ? "info" : "success"
       );
     } catch (error) {
+      if (!isCurrent()) return;
       if (attemptedOnChainTx && connection) {
         const recoveredSignature = extractSignature(error);
         if (recoveredSignature) {
@@ -3375,7 +3405,7 @@ export default function AccessPage() {
                 searchTransactionHistory: true
               });
               const status = statusResponse.value[0];
-              if (status && !status.err) {
+              if (status && !status.err && (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized")) {
                 recoveredStatus = { slot: status.slot };
                 break;
               }
@@ -3406,9 +3436,10 @@ export default function AccessPage() {
               // Keep fallback local timestamp label.
             }
 
+            if (!isCurrent()) return;
             const recoveredMessage =
-              "Access granted for this gate (transaction confirmed on-chain).";
-            setMemberCheck({
+              "Access eligible at the confirmed transaction slot.";
+            if (isCurrent()) setMemberCheck({
               status: "success",
               message: recoveredMessage,
               signature: recoveredSignature,
@@ -3475,301 +3506,10 @@ export default function AccessPage() {
         }
       }
 
-      setMemberCheck({ status: "error", message });
+      if (isCurrent()) setMemberCheck({ status: "error", message });
       notify(message, "error");
     } finally {
       setMemberBusy(false);
-    }
-  };
-
-  const handleLinkWalletSelf = async () => {
-    if (!wallet.publicKey || !connection) {
-      const message = "Connect wallet and choose a valid RPC endpoint first.";
-      setMemberDerive({ status: "error", message });
-      notify(message, "error");
-      return;
-    }
-
-    const gateIdRaw = memberForm.gateId.trim();
-    if (!gateIdRaw) {
-      const message = "Gate ID is required before linking your wallet.";
-      setMemberDerive({ status: "error", message });
-      notify(message, "error");
-      return;
-    }
-
-    setLinkWalletBusy(true);
-    try {
-      const loaded = await loadGateContext(gateIdRaw, { silent: false });
-      if (!loaded) {
-        throw new Error("Unable to link wallet until gate profile loads successfully.");
-      }
-
-      const criteriaVariant = loaded.criteriaVariant;
-      const isIdentityGate =
-        criteriaVariant.type === "verifiedIdentity" ||
-        criteriaVariant.type === "verifiedWithWallet" ||
-        criteriaVariant.type === "combined";
-      if (!isIdentityGate) {
-        throw new Error("This gate does not use identity verification.");
-      }
-
-      const grapeSpaceInput = asPublicKeyValue(criteriaVariant.config.grapeSpace);
-      if (!grapeSpaceInput) {
-        throw new Error("Gate criteria is missing a valid Grape space.");
-      }
-
-      const resolvedVerificationSpace = await resolveVerificationSpaceContext(
-        connection,
-        grapeSpaceInput
-      );
-      if (!resolvedVerificationSpace) {
-        throw new Error("Could not resolve verification space/salt from gate criteria.");
-      }
-
-      const grapeSpace = resolvedVerificationSpace.space;
-      const linkContexts = extractVerificationLinkContexts({
-        grapeSpaceInput,
-        resolvedSpace: grapeSpace,
-        spaceData: resolvedVerificationSpace.spaceData
-      });
-      if (linkContexts.length === 0) {
-        throw new Error(
-          "Could not resolve DAO + salt required for wallet linking in this verification space."
-        );
-      }
-
-      const platforms = normalizePlatforms(criteriaVariant.config.platforms);
-      const platformCandidates = platforms.length > 0 ? platforms : [0];
-      const identityValueCandidates = buildIdentityValueCandidates(memberForm.identityValue);
-      const attempts: Array<{
-        daoId: PublicKey;
-        salt: Uint8Array;
-        platformSeed: number;
-        idHash: Uint8Array;
-        identity: PublicKey;
-      }> = [];
-      const seenAttemptKeys = new Set<string>();
-      const pushAttempt = (attempt: {
-        daoId: PublicKey;
-        salt: Uint8Array;
-        platformSeed: number;
-        idHash: Uint8Array;
-        identity: PublicKey;
-      }) => {
-        const key = [
-          attempt.daoId.toBase58(),
-          String(attempt.platformSeed),
-          bs58.encode(Buffer.from(attempt.idHash)),
-          bs58.encode(Buffer.from(attempt.salt))
-        ].join(":");
-        if (seenAttemptKeys.has(key)) {
-          return;
-        }
-        seenAttemptKeys.add(key);
-        attempts.push(attempt);
-      };
-
-      if (identityValueCandidates.length > 0) {
-        for (const context of linkContexts) {
-          for (const identityValueCandidate of identityValueCandidates) {
-            for (const platformSeed of platformCandidates) {
-              const tag = PLATFORM_TAGS[platformSeed];
-              if (!tag) {
-                continue;
-              }
-              const idHash = GrapeVerificationRegistry.identityHash(
-                context.salt,
-                tag,
-                identityValueCandidate
-              );
-              const [identityPda] = GrapeVerificationRegistry.deriveIdentityPda(
-                grapeSpace,
-                platformSeed,
-                idHash
-              );
-              const identityInfo = await connection.getAccountInfo(identityPda);
-              if (!identityInfo || !identityInfo.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
-                continue;
-              }
-              pushAttempt({
-                daoId: context.daoId,
-                salt: context.salt,
-                platformSeed,
-                idHash,
-                identity: identityPda
-              });
-            }
-          }
-        }
-      }
-
-      if (attempts.length === 0) {
-        const identityAccount = asPublicKeyValue(memberForm.identityAccount);
-        if (identityAccount) {
-          const identityInfo = await connection.getAccountInfo(identityAccount);
-          if (identityInfo && identityInfo.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
-            const seeds = extractIdentitySeedCandidatesFromAccount({
-              identityAccount,
-              identityData: identityInfo.data,
-              grapeSpace
-            });
-            for (const seed of seeds) {
-              for (const context of linkContexts) {
-                pushAttempt({
-                  daoId: context.daoId,
-                  salt: context.salt,
-                  platformSeed: seed.platformSeed,
-                  idHash: seed.idHash,
-                  identity: identityAccount
-                });
-              }
-            }
-          }
-        }
-      }
-
-      if (attempts.length === 0) {
-        throw new Error(
-          "No verified identity was found. Enter Identity Value (exact verified platform ID) or a valid Identity Account, then retry."
-        );
-      }
-
-      const sharedWalletSaltCandidates = uniqueByteArrays(
-        resolvedVerificationSpace.saltCandidates.length > 0
-          ? resolvedVerificationSpace.saltCandidates
-          : linkContexts.map((context) => context.salt)
-      );
-
-      let lastError: Error | null = null;
-      for (const attempt of attempts) {
-        const attemptWalletSaltCandidates = uniqueByteArrays([
-          attempt.salt,
-          ...sharedWalletSaltCandidates
-        ]);
-        const seenLinkAccounts = new Set<string>();
-
-        for (const walletSalt of attemptWalletSaltCandidates) {
-          const walletHash = GrapeVerificationRegistry.walletHash(walletSalt, wallet.publicKey);
-          const built = GrapeVerificationRegistry.buildLinkWalletSelfIx({
-            daoId: attempt.daoId,
-            platformSeed: attempt.platformSeed,
-            idHash: attempt.idHash,
-            wallet: wallet.publicKey,
-            walletHash,
-            payer: wallet.publicKey,
-            programId: GRAPE_VERIFICATION_PROGRAM_ID
-          });
-          if (!built.spaceAcct.equals(grapeSpace) || !built.identity.equals(attempt.identity)) {
-            continue;
-          }
-          if (seenLinkAccounts.has(built.link.toBase58())) {
-            continue;
-          }
-          seenLinkAccounts.add(built.link.toBase58());
-
-          const existingLink = await connection.getAccountInfo(built.link);
-          if (existingLink && existingLink.owner.equals(GRAPE_VERIFICATION_PROGRAM_ID)) {
-            setMemberForm((prev) => ({
-              ...prev,
-              identityAccount: built.identity.toBase58(),
-              linkAccount: built.link.toBase58()
-            }));
-            const message = "Wallet link already exists for this identity.";
-            setMemberDerive({ status: "success", message });
-            notify(message, "success");
-            await handleAutoDeriveMemberAccounts({ silent: true });
-            return;
-          }
-
-          const simulation = await simulateInstructionWithFeePayer({
-            connection,
-            feePayer: wallet.publicKey,
-            instruction: built.ix
-          });
-          const simulationLogs = simulation.value.logs ?? [];
-          const hasWalletHashMismatch = simulationLogs.some((line) =>
-            line.includes("WalletHashMismatch")
-          );
-          if (hasWalletHashMismatch) {
-            continue;
-          }
-          if (simulation.value.err) {
-            lastError = new Error(
-              [
-                "Link attempt simulation failed.",
-                `daoId=${attempt.daoId.toBase58()}`,
-                `platform=${attempt.platformSeed}:${PLATFORM_TAGS[attempt.platformSeed] ?? "unknown"}`,
-                `identity=${attempt.identity.toBase58()}`,
-                `link=${built.link.toBase58()}`,
-                `walletSaltHex=${shortHex(walletSalt, 24)}`,
-                `walletHashHex=${shortHex(walletHash, 24)}`,
-                `simulationErr=${JSON.stringify(simulation.value.err)}`,
-                simulationLogs.length > 0
-                  ? `logs=${simulationLogs.slice(-8).join(" | ")}`
-                  : ""
-              ]
-                .filter(Boolean)
-                .join(" ")
-            );
-            continue;
-          }
-
-          try {
-            const signature = await sendInstructionWithWallet({
-              connection,
-              wallet: wallet as unknown as WalletProvider,
-              instruction: built.ix
-            });
-            setMemberForm((prev) => ({
-              ...prev,
-              identityAccount: built.identity.toBase58(),
-              linkAccount: built.link.toBase58()
-            }));
-            await handleAutoDeriveMemberAccounts({ silent: true });
-            const message = `Wallet linked successfully. Signature: ${signature}`;
-            setMemberDerive({ status: "success", message });
-            notify(message, "success");
-            return;
-          } catch (error) {
-            let errorMessage =
-              error instanceof Error ? error.message : "Failed to submit link wallet transaction.";
-            if (error instanceof SendTransactionError) {
-              let logs = error.logs ?? [];
-              if (logs.length === 0) {
-                try {
-                  logs = (await error.getLogs(connection)) ?? [];
-                } catch {
-                  // Ignore log fetch failures and keep original error text.
-                }
-              }
-              if (logs.length > 0) {
-                errorMessage = `${errorMessage} Logs: ${logs.slice(-8).join(" | ")}`;
-              }
-            }
-            lastError = new Error(
-              [
-                "Link attempt failed.",
-                `daoId=${attempt.daoId.toBase58()}`,
-                `platform=${attempt.platformSeed}:${PLATFORM_TAGS[attempt.platformSeed] ?? "unknown"}`,
-                `identity=${attempt.identity.toBase58()}`,
-                `link=${built.link.toBase58()}`,
-                `walletSaltHex=${shortHex(walletSalt, 24)}`,
-                `walletHashHex=${shortHex(walletHash, 24)}`,
-                errorMessage
-              ].join(" ")
-            );
-          }
-        }
-      }
-
-      throw lastError ?? new Error("Failed to link wallet for the resolved identity.");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to link wallet.";
-      setMemberDerive({ status: "error", message });
-      notify(message, "error");
-    } finally {
-      setLinkWalletBusy(false);
     }
   };
 
@@ -4306,7 +4046,7 @@ export default function AccessPage() {
             <Step completed={gateContext.status === "ready"}>
               <StepLabel>Review requirements</StepLabel>
             </Step>
-            <Step completed={memberCheck.status === "success" || memberCheck.status === "error"}>
+            <Step completed={memberCheck.status === "success" && memberCheck.passed === true}>
               <StepLabel>Get access</StepLabel>
             </Step>
           </Stepper>
@@ -4416,6 +4156,24 @@ export default function AccessPage() {
                 </Stack>
               ))}
             </Stack>
+            <Divider sx={{ my: 2 }} />
+            <Typography variant="subtitle1">Wallet requirement checklist</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              Read-only preflight, separate from the program access check. Identity verified does not mean access eligible.
+            </Typography>
+            {requirementsBusy && <Typography role="status">Loading account evidence…</Typography>}
+            <Stack spacing={1} aria-live="polite">
+              {requirements.map(row => <Alert key={row.label} severity={row.state === "met" ? "success" : row.state === "unmet" ? "warning" : "info"}>
+                <strong>{row.label} — {row.state === "not-checked" ? "Not checked" : row.state === "unavailable" ? "Unavailable" : row.state === "met" ? "Met" : "Unmet"}</strong>
+                <Typography variant="body2">{row.detail}</Typography>
+                {row.state !== "met" && <Typography variant="body2">Next: {row.action}</Typography>}
+              </Alert>)}
+            </Stack>
+            <Alert severity="info" sx={{ mt: 2 }}>
+              Access eligibility only. This interface does not establish reward eligibility or enforce reward claims.
+              Verification proves account ownership and wallet links, not a unique person.
+              Single Use is not a guarantee of one reward per person or per wallet.
+            </Alert>
             {gateVerificationPlatforms.length > 0 && (
               <Stack direction="row" spacing={0.8} useFlexGap flexWrap="wrap" sx={{ mt: 1.2 }}>
                 {gateVerificationPlatforms.map((platform) => {
@@ -4534,17 +4292,9 @@ export default function AccessPage() {
                 </Button>
                 <Button
                   variant="outlined"
-                  onClick={() => void handleLinkWalletSelf()}
-                  disabled={
-                    linkWalletBusy ||
-                    memberDeriveBusy ||
-                    identityDebugBusy ||
-                    !memberForm.gateId ||
-                    !isWalletConnected ||
-                    !connection
-                  }
+                  href={verificationPortalUrl} target="_blank" rel="noreferrer"
                 >
-                  {linkWalletBusy ? "Linking..." : "Link Wallet"}
+                  Link wallet in Verification
                 </Button>
                 <Button
                   variant="outlined"
@@ -4755,10 +4505,10 @@ export default function AccessPage() {
               <Stack spacing={1.2}>
                 <Typography variant="subtitle1">
                   {memberCheck.passed === true
-                    ? "You are in."
+                    ? "Access eligible at check time."
                     : memberCheck.passed === false
-                      ? "You are close."
-                      : "Action needed."}
+                      ? "Access requirements not met."
+                      : "Access result unavailable. Retry the check."}
                 </Typography>
                 {gateContext.profile.supportLabel && (
                   <Typography color="text.secondary">{gateContext.profile.supportLabel}</Typography>
@@ -4786,8 +4536,8 @@ export default function AccessPage() {
                 {memberCheck.checkedAtLabel && (
                   <Typography variant="caption" color="text.secondary">
                     {memberCheck.verificationMode === "rpc"
-                      ? "Verified via RPC"
-                      : "Verified on-chain"}
+                      ? "Access checked via RPC simulation"
+                      : "Access checked on-chain"}
                     {`: ${memberCheck.checkedAtLabel}`}
                     {typeof memberCheck.verificationSlot === "number"
                       ? ` (slot ${memberCheck.verificationSlot})`
