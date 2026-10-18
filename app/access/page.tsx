@@ -54,6 +54,8 @@ import * as VineReputationClient from "@grapenpm/vine-reputation-client";
 
 import { inspectRequirement, reputationIssues, identityIssue, walletLinkIssue, RequestScope, type RequirementResult } from "../lib/eligibility";
 
+import { publicStatusPath } from "../lib/public-status";
+
 interface WalletProvider {
   publicKey?: PublicKey | null;
   signTransaction?: (transaction: Transaction) => Promise<Transaction>;
@@ -4395,7 +4397,7 @@ export default function AccessPage() {
             <Alert severity="error">{memberDerive.message}</Alert>
           )}
 
-          {isAdvancedMode && <FormControlLabel
+          <FormControlLabel
             control={
               <Switch
                 checked={memberForm.storeRecord}
@@ -4403,7 +4405,11 @@ export default function AccessPage() {
               />
             }
             label="Store my check record on-chain"
-          />}
+          />
+          <Typography variant="body2" color="text.secondary">
+            A stored check requires a transaction and may require rent. It lets anyone read and share your dated result.
+            A simulation does not create a public record.
+          </Typography>
 
           {isAdvancedMode ? (
             <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
@@ -4431,6 +4437,25 @@ export default function AccessPage() {
             >
               {memberBusy ? "Checking Access..." : "Check My Access"}
             </Button>
+          )}
+
+          {isWalletConnected && memberForm.gateId && (
+            <Paper variant="outlined" sx={{ p: 2 }}>
+              <Stack spacing={1}>
+                <Typography variant="h6">Your public access status</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Share a page for this wallet and gate. Visitors can read the latest stored check without connecting a wallet.
+                  The link exposes your wallet address, gate and network, but no social account identifiers.
+                </Typography>
+                {cluster === "custom" ? <Alert severity="info">Public sharing supports Mainnet Beta, Devnet and Testnet. Custom RPC URLs are not included in public links.</Alert> : (
+                  <Button variant="outlined" sx={{ alignSelf: "flex-start" }} onClick={() => {
+                    try {
+                      window.open(publicStatusPath({ gateId: memberForm.gateId.trim(), wallet: connectedWalletAddress, cluster }), "_blank", "noopener,noreferrer");
+                    } catch (error) { notify(error instanceof Error ? error.message : "Invalid status link.", "error"); }
+                  }}>View and share my public status</Button>
+                )}
+              </Stack>
+            </Paper>
           )}
 
           <Divider />

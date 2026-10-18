@@ -209,3 +209,15 @@ Private project codebase. Respect your organization’s distribution and usage p
 Access evaluates community requirements; Verification manages account ownership and wallet links. Access results do not establish reward eligibility or unique-person status. See [the implementation review and entitlement integration plan](docs/eligibility-and-entitlements.md) for SDK/program evidence, lifecycle limitations, remaining abuse paths and validation results.
 
 Run focused eligibility tests with `npm test`.
+
+## Public wallet status
+
+Members can open **View and share my public status** on `/access`, then copy the public URL. Visitors do not need to connect a wallet:
+
+`/status?gateId=<GATE_ID>&wallet=<WALLET_ADDRESS>&cluster=mainnet-beta`
+
+The page reads the gate and wallet's stored check record together at confirmed commitment, validates account ownership and identifiers, and shows the recorded check time, network, current gate activity and current requirements. It labels a passing record as historical evidence, not a fresh access or reward entitlement. The policy at the historical check cannot be reconstructed from this record.
+
+Enable **Store my check record on-chain** when checking access to create/update a shareable record (transaction fees and account rent may apply). Simulations do not create records. An absent or closed record is not an eligibility failure. RPC and account-layout failures display **Status unavailable**.
+
+Public links contain only the wallet address, gate ID and standard network. Custom RPC URLs and social identifiers are not shared. URL `passed`/timestamp parameters are never trusted. The page supports Mainnet Beta, Devnet and Testnet and does not deploy or publish itself.
