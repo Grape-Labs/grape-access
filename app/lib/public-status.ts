@@ -41,7 +41,8 @@ export function describePublicRequirements(criteria: Access["criteria"]): string
   }
   if (["combined", "verifiedIdentity", "verifiedWithWallet"].includes(kind)) {
     const names: Record<number, string> = { 0: "Discord", 1: "Telegram", 2: "Twitter / X", 3: "Email" };
-    const platforms = Array.isArray(c.platforms) ? c.platforms.map(p => names[Number(p)] ?? `Platform ${p}`).join(", ") : "";
+    const platformValues = Array.isArray(c.platforms) ? c.platforms : c.platforms instanceof Uint8Array ? Array.from(c.platforms) : [];
+    const platforms = platformValues.map(p => names[Number(p)] ?? `Platform ${p}`).join(", ");
     lines.push(`Current verification on one accepted platform: ${platforms || "none configured"}.`);
     lines.push(`Verification community space: ${String(c.grapeSpace)}.`);
     lines.push(kind === "verifiedWithWallet" || c.requireWalletLink ? "Verified identity must be linked to this wallet." : "This policy does not require a wallet link.");

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { BorshAccountsCoder, BN } = require('@coral-xyz/anchor');
 const { PublicKey } = require('@solana/web3.js');
 const sdk = require('@grapenpm/grape-access-sdk');
-const { readPublicStatus, parseStatusSelection, publicStatusPath } = require(process.env.PUBLIC_STATUS_MODULE);
+const { readPublicStatus, parseStatusSelection, publicStatusPath, describePublicRequirements } = require(process.env.PUBLIC_STATUS_MODULE);
 const key = n => new PublicKey(new Uint8Array(32).fill(n));
 const selection = { gateId: key(1).toBase58(), wallet: key(2).toBase58(), cluster: 'devnet' };
 const coder = new BorshAccountsCoder(sdk.IDL);
@@ -56,4 +56,10 @@ test('URL verdicts and RPC credentials never become evidence or enter canonical 
 });
 test('invalid identifiers and custom networks are rejected', () => {
   for (const values of [{ ...selection, wallet: 'invalid' }, { ...selection, gateId: '' }, { ...selection, cluster: 'custom' }]) assert.throws(() => parseStatusSelection(new URLSearchParams(values)));
+});
+
+test('decoded byte-vector platforms are accurately described on the public page', () => {
+  const lines = describePublicRequirements({ verifiedWithWallet: { grapeSpace: key(3), platforms: Buffer.from([0, 2]) } });
+  assert.match(lines[0], /Discord, Twitter/);
+  assert.match(lines[2], /linked to this wallet/);
 });

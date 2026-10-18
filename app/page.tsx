@@ -459,7 +459,7 @@ const templates: GateTemplate[] = [
   {
     id: "community-rep",
     title: "Community Reputation",
-    description: "Require a minimum reputation score and verified social identity.",
+    description: "For contributing members: require reputation and a verified account linked to their wallet. Starts at 1,000 points in season 1 with a 7-day access duration.",
     criteriaKind: "combined",
     gateTypeKind: "timeLimited",
     defaults: {
@@ -473,7 +473,7 @@ const templates: GateTemplate[] = [
   {
     id: "token-community",
     title: "Token Holder",
-    description: "Grant access to holders of a token, with reusable checks.",
+    description: "For token communities: require a minimum token balance. You provide the token address and amount; members can check again.",
     criteriaKind: "tokenHolding",
     gateTypeKind: "reusable",
     defaults: {
@@ -484,7 +484,7 @@ const templates: GateTemplate[] = [
   {
     id: "nft-club",
     title: "NFT Club",
-    description: "Require users to hold at least one NFT in your collection.",
+    description: "For collection communities: require at least one NFT from your collection. You provide the collection address.",
     criteriaKind: "nftCollection",
     gateTypeKind: "reusable",
     defaults: {
@@ -3796,7 +3796,7 @@ export default function Page() {
       const signature = extractSignature(result);
       setActivity((prev) => [
         {
-          label: "Initialize Gate",
+          label: "Create gate",
           message: signature ? "Transaction submitted." : "Action completed.",
           signature,
           createdAt: Date.now()
@@ -5600,13 +5600,16 @@ export default function Page() {
                 >
                   {isEditMode
                     ? `Edit mode: updating criteria for gate ${editorGateId || "(not set)"}.`
-                    : "Create mode: initializing a new gate account."}
+                    : "Set the requirements your members must meet. Review every setting before approving the transaction; choosing a template does not create a gate."}
                 </Alert>
 
                 {createStep === 0 && (
                   <Stack spacing={2}>
                     <Typography variant="subtitle1">
-                      Start with a template so your team can launch quickly.
+                      Who should be eligible for your DAO?
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Choose a starting policy below, then adjust its requirements. For reputation and verification, have your community DAO address ready. Account verification stays in Grape Verification.
                     </Typography>
                     <Grid container spacing={2}>
                       {templates.map((template) => (
@@ -5621,7 +5624,7 @@ export default function Page() {
                               borderWidth: templateId === template.id ? 2 : 1
                             }}
                           >
-                            <CardActionArea onClick={() => applyTemplate(template.id)}>
+                            <CardActionArea onClick={() => applyTemplate(template.id)} aria-pressed={templateId === template.id}>
                               <Box sx={{ p: 2 }}>
                                 <Stack direction="row" justifyContent="space-between" alignItems="center">
                                   <Typography variant="h6" sx={{ fontSize: "1.06rem" }}>
@@ -5652,7 +5655,7 @@ export default function Page() {
                   <Stack spacing={2}>
                     <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2} alignItems={{ sm: "center" }} justifyContent="space-between">
                       <Box>
-                        <Typography variant="h6">Set up {templates.find((item) => item.id === templateId)?.title}</Typography>
+                        <Typography variant="h6">Set up {criteriaOptions.find((item) => item.value === createForm.criteriaKind)?.label}</Typography>
                         <Typography variant="body2" color="text.secondary">
                           Only the information needed for this policy is shown. Technical fields stay out of the way.
                         </Typography>
@@ -6319,6 +6322,9 @@ export default function Page() {
                             {" "}Verification and reputation do not establish human uniqueness. Configure identity and wallet links in the Verification dashboard.
                           </Alert>
                           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                            For DAO admission, review account history and ask members to disclose additional wallets through your existing review process. Several wallets linked to one identity can still pass independently; this gate does not enforce one membership per person.
+                          </Typography>
+                          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
                             Combined criteria do not support a reputation duration. Time-locked reputation is a separate policy; selecting it replaces the combined requirements.
                             Access checks do not enforce reward entitlements. Single Use must not be treated as one reward per person.
                           </Typography>
@@ -6458,12 +6464,12 @@ export default function Page() {
                         <Grid size={{ xs: 12, sm: 6 }}>
                           <TextField
                             fullWidth
-                            label="Duration Seconds"
+                            label="Access duration (seconds)"
                             value={createForm.durationSeconds}
                             onChange={(event) =>
                               updateCreateForm("durationSeconds", event.target.value)
                             }
-                            helperText="How long a successful access stays valid."
+                            helperText="Configured access duration, separate from reputation age. 86,400 seconds = 1 day; 604,800 = 7 days."
                           />
                         </Grid>
                       )}
@@ -6498,16 +6504,35 @@ export default function Page() {
                   <Stack spacing={2}>
                     <Typography variant="subtitle1">
                       {isEditMode
-                        ? "Review the criteria update payload, then apply it to the selected gate."
-                        : "Review this payload, then initialize the gate on-chain."}
+                        ? "Confirm the requirements below. Saving will change the rules for this existing gate."
+                        : "Confirm what members will need before creating your gate."}
                     </Typography>
+                    <Paper variant="outlined" sx={{ p: 2 }}>
+                      <Stack spacing={1.2}>
+                        <Typography variant="h6">What members need</Typography>
+                        <Typography>{criteriaOptions.find(item => item.value === createForm.criteriaKind)?.label}</Typography>
+                        {["combined", "minReputation", "timeLockedReputation"].includes(createForm.criteriaKind) && <Typography variant="body2">At least <strong>{createForm.minPoints || "Not set"} reputation points</strong> in <strong>season {createForm.season || "Not set"}</strong>. Points from other seasons do not count.</Typography>}
+                        {["combined", "verifiedIdentity", "verifiedWithWallet"].includes(createForm.criteriaKind) && <>
+                          <Typography variant="body2">A current verified account on any one of: <strong>{createForm.selectedPlatforms.map(value => platformOptions.find(option => option.value === value)?.label || `Platform ${value}`).join(", ") || "No platform selected"}</strong>.</Typography>
+                          <Alert severity={createForm.criteriaKind === "verifiedWithWallet" || (createForm.criteriaKind === "combined" && createForm.requireWalletLink) ? "info" : "warning"}>
+                            {createForm.criteriaKind === "verifiedWithWallet" || (createForm.criteriaKind === "combined" && createForm.requireWalletLink) ? "That verified account must be linked to the wallet being checked." : "This policy does not require that verified account to be linked to the wallet being checked."}
+                          </Alert>
+                        </>}
+                        {createForm.criteriaKind === "tokenHolding" && <Typography variant="body2">Minimum token amount: {createForm.minAmount || "Not set"}. Confirm the token address and amount in the settings.</Typography>}
+                        {createForm.criteriaKind === "nftCollection" && <Typography variant="body2">At least {createForm.minCount || "Not set"} NFT(s) from the configured collection.</Typography>}
+                        <Divider />
+                        <Typography variant="body2">Access type: {gateTypeOptions.find(item => item.value === createForm.gateTypeKind)?.label}{createForm.gateTypeKind === "timeLimited" ? ` · configured duration: ${createForm.durationSeconds} seconds (${Number(createForm.durationSeconds) / 86400} days)` : ""}.</Typography>
+                        <Typography variant="caption" color="text.secondary">Access eligibility only. This policy does not approve DAO membership, prove a unique person or enforce reward claims.</Typography>
+                        <Button onClick={() => setCreateStep(1)} sx={{ alignSelf: "flex-start" }}>Edit requirements</Button>
+                      </Stack>
+                    </Paper>
                     {!isAdvancedBuilderMode && (
                       <Paper variant="outlined" sx={{ p: 2 }}>
                         <Stack spacing={1.2}>
                           <Stack direction="row" justifyContent="space-between" spacing={2}>
                             <Typography color="text.secondary">Policy</Typography>
                             <Typography fontWeight={600} textAlign="right">
-                              {templates.find((item) => item.id === templateId)?.title ?? createForm.criteriaKind}
+                              {criteriaOptions.find((item) => item.value === createForm.criteriaKind)?.label ?? createForm.criteriaKind}
                             </Typography>
                           </Stack>
                           <Divider />
@@ -6583,7 +6608,7 @@ export default function Page() {
                             : "Update Gate Criteria"
                           : createBusy
                             ? "Initializing..."
-                            : "Initialize Gate"}
+                            : "Create gate"}
                       </Button>
                     </Stack>
                     {isEditMode && isWalletConnected && selectedGateAuthority && !isSelectedGateAuthority && (

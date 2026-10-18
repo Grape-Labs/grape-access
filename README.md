@@ -221,3 +221,7 @@ The page reads the gate and wallet's stored check record together at confirmed c
 Enable **Store my check record on-chain** when checking access to create/update a shareable record (transaction fees and account rent may apply). Simulations do not create records. An absent or closed record is not an eligibility failure. RPC and account-layout failures display **Status unavailable**.
 
 Public links contain only the wallet address, gate ID and standard network. Custom RPC URLs and social identifiers are not shared. URL `passed`/timestamp parameters are never trusted. The page supports Mainnet Beta, Devnet and Testnet and does not deploy or publish itself.
+
+## UI-only scope
+
+No database or program upgrade is required. The interface explains existing wallet eligibility and supports public sharing; it does not introduce a membership registry or admission workflow. DAO review stays in the community’s existing process. Existing Discord callback behavior is preserved; it is not membership or duplicate-claim enforcement.

@@ -4049,13 +4049,26 @@ export default function AccessPage() {
               <StepLabel>Review requirements</StepLabel>
             </Step>
             <Step completed={memberCheck.status === "success" && memberCheck.passed === true}>
-              <StepLabel>Get access</StepLabel>
+              <StepLabel>Check eligibility</StepLabel>
             </Step>
           </Stepper>
 
           {!isWalletConnected && (
             <Alert severity="info">Connect your wallet, then run your access check.</Alert>
           )}
+          {gateContext.status === "ready" && (vineDaoLink || verificationDaoLink) && (
+            <Paper variant="outlined" sx={{ p: 2 }}>
+              <Stack spacing={1}>
+                <Typography variant="subtitle1">Prepare your wallet</Typography>
+                <Typography variant="body2" color="text.secondary">Review the checklist below. If something is missing, use your community dashboards to resolve it, then return and check again with the same wallet.</Typography>
+                <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                  {verificationDaoLink && <Button variant="outlined" href={verificationDaoLink} target="_blank" rel="noreferrer">Verify account or link wallet</Button>}
+                  {vineDaoLink && <Button variant="outlined" href={vineDaoLink} target="_blank" rel="noreferrer">View community reputation</Button>}
+                </Stack>
+              </Stack>
+            </Paper>
+          )}
+
 
           {isAdvancedMode && <TextField
             fullWidth
@@ -4175,6 +4188,7 @@ export default function AccessPage() {
               Access eligibility only. This interface does not establish reward eligibility or enforce reward claims.
               Verification proves account ownership and wallet links, not a unique person.
               Single Use is not a guarantee of one reward per person or per wallet.
+              Wallets linked to the same identity are checked independently. If your DAO requires admission review, contact its admins and disclose your additional wallets; passing this check does not record that approval.
             </Alert>
             {gateVerificationPlatforms.length > 0 && (
               <Stack direction="row" spacing={0.8} useFlexGap flexWrap="wrap" sx={{ mt: 1.2 }}>
