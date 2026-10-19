@@ -3729,16 +3729,6 @@ export default function AccessPage() {
     gateContext.criteriaVariant?.type === "timeLockedReputation" ||
     gateContext.criteriaVariant?.type === "combined";
   const requiresWalletLink = Boolean(gateContext.criteriaVariant?.config.requireWalletLink);
-  const identityIssueDetected = useMemo(() => {
-    const diagnostic = `${memberDerive.message} ${memberCheck.message}`.toLowerCase();
-    return (
-      diagnostic.includes("identity") ||
-      diagnostic.includes("verification") ||
-      diagnostic.includes("verified") ||
-      diagnostic.includes("link account") ||
-      diagnostic.includes("wallet link")
-    );
-  }, [memberDerive.message, memberCheck.message]);
   const verificationPortalUrl = useMemo(() => {
     if (gateContext.verificationDaoId) {
       return `https://verification.governance.so/dao/${gateContext.verificationDaoId}`;
@@ -4056,20 +4046,6 @@ export default function AccessPage() {
           {!isWalletConnected && (
             <Alert severity="info">Connect your wallet, then run your access check.</Alert>
           )}
-          {gateContext.status === "ready" && (vineDaoLink || verificationDaoLink) && (
-            <Paper variant="outlined" sx={{ p: 2 }}>
-              <Stack spacing={1}>
-                <Typography variant="subtitle1">Prepare your wallet</Typography>
-                <Typography variant="body2" color="text.secondary">Review the checklist below. If something is missing, use your community dashboards to resolve it, then return and check again with the same wallet.</Typography>
-                <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
-                  {verificationDaoLink && <Button variant="outlined" href={verificationDaoLink} target="_blank" rel="noreferrer">Verify account or link wallet</Button>}
-                  {vineDaoLink && <Button variant="outlined" href={vineDaoLink} target="_blank" rel="noreferrer">View community reputation</Button>}
-                </Stack>
-              </Stack>
-            </Paper>
-          )}
-
-
           {isAdvancedMode && <TextField
             fullWidth
             label="Gate ID"
@@ -4139,146 +4115,33 @@ export default function AccessPage() {
           )}
 
           <Paper variant="outlined" sx={{ p: 2, borderColor: "rgba(109, 184, 255, 0.24)" }}>
-            <Typography variant="h6" sx={{ mb: 0.35 }}>
-              What you need
+            <Typography variant="h6" sx={{ mb: 0.5 }}>Your requirements</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+              {requirementsBusy ? "Checking this wallet’s requirements…"
+                : requirements.length > 0 && requirements.every(row => row.state === "met")
+                  ? "All listed requirements are met. Select Check My Access below to confirm eligibility."
+                  : "Review your wallet’s status below, then select Check My Access. Missing requirements include a next step."}
             </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.4 }}>
-              Complete any missing requirement, then return here to check your access.
-            </Typography>
-            <Stack spacing={0.6}>
-              {eligibilitySummary.map((line, index) => (
-                <Stack key={line} direction="row" spacing={1} alignItems="flex-start">
-                  <Box
-                    sx={{
-                      width: 24,
-                      height: 24,
-                      flex: "0 0 24px",
-                      borderRadius: "50%",
-                      display: "grid",
-                      placeItems: "center",
-                      fontSize: "0.75rem",
-                      fontWeight: 700,
-                      color: gateContext.profile.accent,
-                      border: `1px solid ${gateContext.profile.accent}88`,
-                      backgroundColor: `${gateContext.profile.accent}18`
-                    }}
-                  >
-                    {index + 1}
-                  </Box>
-                  <Typography sx={{ fontSize: "0.92rem", color: "text.secondary", pt: 0.2 }}>
-                    {line}
-                  </Typography>
-                </Stack>
-              ))}
-            </Stack>
-            <Divider sx={{ my: 2 }} />
-            <Typography variant="subtitle1">Wallet requirement checklist</Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-              Read-only preflight, separate from the program access check. Identity verified does not mean access eligible.
-            </Typography>
-            {requirementsBusy && <Typography role="status">Loading account evidence…</Typography>}
-            <Stack spacing={1} aria-live="polite">
+            {(requirements.length === 0 || requirements.some(row => row.label === "Gate-specific requirements")) && <Stack spacing={0.5}>{eligibilitySummary.map(line => <Typography key={line} variant="body2">{line}</Typography>)}</Stack>}
+            <Stack spacing={1} aria-live="polite" aria-busy={requirementsBusy}>
               {requirements.map(row => <Alert key={row.label} severity={row.state === "met" ? "success" : row.state === "unmet" ? "warning" : "info"}>
                 <strong>{row.label} — {row.state === "not-checked" ? "Not checked" : row.state === "unavailable" ? "Unavailable" : row.state === "met" ? "Met" : "Unmet"}</strong>
-                <Typography variant="body2">{row.detail}</Typography>
-                {row.state !== "met" && <Typography variant="body2">Next: {row.action}</Typography>}
+                {row.state !== "met" && <>
+                  <Typography variant="body2">{row.detail}</Typography>
+                  <Typography variant="body2">Next: {row.action}</Typography>
+                  {row.state === "unmet" && row.action.startsWith("Open Verification") && <Button href={verificationPortalUrl} target="_blank" rel="noreferrer" size="small" sx={{ mt: 1 }}>Open verification</Button>}
+                  {row.state === "unmet" && row.action.startsWith("Open View my reputation") && vineDaoLink && <Button href={vineDaoLink} target="_blank" rel="noreferrer" size="small" sx={{ mt: 1 }}>View my reputation</Button>}
+                </>}
               </Alert>)}
             </Stack>
-            <Alert severity="info" sx={{ mt: 2 }}>
-              Access eligibility only. This interface does not establish reward eligibility or enforce reward claims.
-              Verification proves account ownership and wallet links, not a unique person.
-              Single Use is not a guarantee of one reward per person or per wallet.
-              Wallets linked to the same identity are checked independently. If your DAO requires admission review, contact its admins and disclose your additional wallets; passing this check does not record that approval.
-            </Alert>
-            {gateVerificationPlatforms.length > 0 && (
-              <Stack direction="row" spacing={0.8} useFlexGap flexWrap="wrap" sx={{ mt: 1.2 }}>
-                {gateVerificationPlatforms.map((platform) => {
-                  const visual = PLATFORM_VISUALS[platform] ?? {
-                    fallbackGlyph: "?",
-                    bg: "rgba(109, 184, 255, 0.22)",
-                    fg: "#EEF5FF"
-                  };
-                  const PlatformIcon = PLATFORM_ICONS[platform];
-                  return (
-                    <Box
-                      key={`platform-${platform}`}
-                      sx={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: 0.7,
-                        px: 1,
-                        py: 0.45,
-                        borderRadius: 999,
-                        border: "1px solid rgba(109, 184, 255, 0.25)",
-                        backgroundColor: "rgba(12, 18, 30, 0.68)"
-                      }}
-                    >
-                      <Box
-                        sx={{
-                          width: 18,
-                          height: 18,
-                          borderRadius: "50%",
-                          display: "inline-flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          fontSize: "0.62rem",
-                          fontWeight: 700,
-                          lineHeight: 1,
-                          backgroundColor: visual.bg,
-                          color: visual.fg
-                        }}
-                      >
-                        {PlatformIcon ? <PlatformIcon size={11} /> : visual.fallbackGlyph}
-                      </Box>
-                      <Typography sx={{ fontSize: "0.76rem", color: "text.secondary", fontWeight: 600 }}>
-                        {formatPlatformLabel(platform)}
-                      </Typography>
-                    </Box>
-                  );
-                })}
-              </Stack>
-            )}
-            {gateContext.status === "ready" && (requiresIdentityVerification || requiresReputation) && (
-              <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mt: 1.6 }}>
-                {requiresIdentityVerification && (
-                  <Button href={verificationPortalUrl} target="_blank" rel="noreferrer" variant="outlined">
-                    Verify my identity
-                  </Button>
-                )}
-                {requiresReputation && vineDaoLink && (
-                  <Button href={vineDaoLink} target="_blank" rel="noreferrer" variant="outlined">
-                    View my reputation
-                  </Button>
-                )}
-              </Stack>
-            )}
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1.5 }}>These account checks are a preview. Check My Access confirms the gate result.</Typography>
+            <Box component="details" sx={{ mt: 1.5 }}>
+              <Box component="summary" sx={{ cursor: "pointer", color: "text.secondary", fontSize: "0.85rem" }}>What this result means</Box>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                Access eligibility only, not DAO admission or reward eligibility. Verification confirms account ownership and wallet links, not a unique person. Wallets are checked independently. Single Use does not enforce one reward per person or wallet. Contact your DAO for admission and reward policies.
+              </Typography>
+            </Box>
           </Paper>
-          {gateContext.status === "ready" && requiresIdentityVerification && identityIssueDetected && (
-            <Alert
-              severity={identityIssueDetected ? "warning" : "info"}
-              action={
-                <Button
-                  href={verificationPortalUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  variant="outlined"
-                  size="small"
-                  sx={{ whiteSpace: "nowrap" }}
-                >
-                  Verify Now
-                </Button>
-              }
-            >
-              Verification is required for this gate. If this wallet is not already verified on
-              {" "}
-              <Box component="span" className="mono">
-                verification.governance.so
-              </Box>
-              {requiresWalletLink
-                ? ", complete verification and wallet linking there, then return and run Check My Access again."
-                : ", complete verification there, then return and run Check My Access again."}
-            </Alert>
-          )}
 
           {isAdvancedMode && (
             <Alert
@@ -4418,11 +4281,10 @@ export default function AccessPage() {
                 onChange={(event) => updateMemberForm("storeRecord", event.target.checked)}
               />
             }
-            label="Store my check record on-chain"
+            label="Save a public, shareable result"
           />
           <Typography variant="body2" color="text.secondary">
-            A stored check requires a transaction and may require rent. It lets anyone read and share your dated result.
-            A simulation does not create a public record.
+            Saving sends a transaction, costs network fees and may require account rent. Your wallet address and dated result become public. Turn this off to check without saving.
           </Typography>
 
           {isAdvancedMode ? (
